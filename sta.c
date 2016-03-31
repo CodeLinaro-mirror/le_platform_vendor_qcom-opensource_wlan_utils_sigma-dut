@@ -794,7 +794,18 @@ static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 	}
 
 	ip = get_param(cmd, "ip");
+	if (!ip) {
+		send_resp(dut, conn, SIGMA_INVALID,
+			  "ErrorCode,Missing IP address");
+		return 0;
+	}
+
 	mask = get_param(cmd, "mask");
+	if (!mask) {
+		send_resp(dut, conn, SIGMA_INVALID,
+			  "ErrorCode,Missing subnet mask");
+		return 0;
+	}
 
 	if (type == 2) {
 		int net = atoi(mask);
@@ -839,8 +850,7 @@ static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 		static_ip_file(6, ip, mask, NULL);
 		return 1;
 	} else if (type == 1) {
-		if (ip == NULL || !is_ip_addr(ip) ||
-		    mask == NULL || !is_ip_addr(mask))
+		if (!is_ip_addr(ip) || !is_ip_addr(mask))
 			return -1;
 	}
 
@@ -1246,7 +1256,8 @@ static int cmd_sta_set_psk(struct sigma_dut *dut, struct sigma_conn *conn,
 
 
 static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
-			  const char *ifname, struct sigma_cmd *cmd)
+			  const char *ifname, int username_identity,
+			  struct sigma_cmd *cmd)
 {
 	const char *val, *alg;
 	int id;
@@ -1318,16 +1329,18 @@ ca_cert_selected:
 			return -2;
 	}
 
-	val = get_param(cmd, "username");
-	if (val) {
-		if (set_network_quoted(ifname, id, "identity", val) < 0)
-			return -2;
-	}
+	if (username_identity) {
+		val = get_param(cmd, "username");
+		if (val) {
+			if (set_network_quoted(ifname, id, "identity", val) < 0)
+				return -2;
+		}
 
-	val = get_param(cmd, "password");
-	if (val) {
-		if (set_network_quoted(ifname, id, "password", val) < 0)
-			return -2;
+		val = get_param(cmd, "password");
+		if (val) {
+			if (set_network_quoted(ifname, id, "password", val) < 0)
+				return -2;
+		}
 	}
 
 	return id;
@@ -1356,7 +1369,7 @@ static int cmd_sta_set_eaptls(struct sigma_dut *dut, struct sigma_conn *conn,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, 1, cmd);
 	if (id < 0)
 		return id;
 
@@ -1453,7 +1466,7 @@ static int cmd_sta_set_eapttls(struct sigma_dut *dut, struct sigma_conn *conn,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, 1, cmd);
 	if (id < 0)
 		return id;
 
@@ -1488,7 +1501,7 @@ static int cmd_sta_set_eapsim(struct sigma_dut *dut, struct sigma_conn *conn,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, !dut->sim_no_username, cmd);
 	if (id < 0)
 		return id;
 
@@ -1515,7 +1528,7 @@ static int cmd_sta_set_peap(struct sigma_dut *dut, struct sigma_conn *conn,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, 1, cmd);
 	if (id < 0)
 		return id;
 
@@ -1566,7 +1579,7 @@ static int cmd_sta_set_eapfast(struct sigma_dut *dut, struct sigma_conn *conn,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, 1, cmd);
 	if (id < 0)
 		return id;
 
@@ -1624,7 +1637,7 @@ static int cmd_sta_set_eapaka(struct sigma_dut *dut, struct sigma_conn *conn,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, !dut->sim_no_username, cmd);
 	if (id < 0)
 		return id;
 
@@ -1651,7 +1664,7 @@ static int cmd_sta_set_eapakaprime(struct sigma_dut *dut,
 	else
 		ifname = intf;
 
-	id = set_eap_common(dut, conn, ifname, cmd);
+	id = set_eap_common(dut, conn, ifname, !dut->sim_no_username, cmd);
 	if (id < 0)
 		return id;
 
@@ -2524,6 +2537,21 @@ static void ath_sta_set_amsdu(struct sigma_dut *dut, const char *intf,
 }
 
 
+static int iwpriv_sta_set_ampdu(struct sigma_dut *dut, const char *intf,
+				int ampdu)
+{
+	char buf[60];
+
+	snprintf(buf, sizeof(buf), "iwpriv %s ampdu %d", intf, ampdu);
+	if (system(buf) != 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv ampdu failed");
+		return -1;
+	}
+
+	return 0;
+}
+
+
 static void ath_sta_set_stbc(struct sigma_dut *dut, const char *intf,
 			     const char *val)
 {
@@ -3111,7 +3139,8 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 		sigma_dut_print(dut, DUT_MSG_DEBUG, "%s A-MPDU aggregation",
 				ampdu ? "Enabling" : "Disabling");
 		snprintf(buf, sizeof(buf), "SET ampdu %d", ampdu);
-		if (wpa_command(intf, buf) < 0) {
+		if (wpa_command(intf, buf) < 0 &&
+		    iwpriv_sta_set_ampdu(dut, intf, ampdu) < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,set aggr failed");
 			return 0;
@@ -3230,6 +3259,7 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 			}
 			break;
 		case DRIVER_ATHEROS:
+			novap_reset(dut, intf);
 			ath_config_dyn_bw_sig(dut, intf, val);
 			break;
 		default:
@@ -3241,11 +3271,18 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 
 	val = get_param(cmd, "RTS_FORCE");
 	if (val) {
+		novap_reset(dut, intf);
 		if (strcasecmp(val, "Enable") == 0) {
 			snprintf(buf, sizeof(buf), "iwconfig %s rts 64", intf);
 			if (system(buf) != 0) {
 				sigma_dut_print(dut, DUT_MSG_ERROR,
 						"Failed to set RTS_FORCE 64");
+			}
+			snprintf(buf, sizeof(buf),
+				 "wifitool %s beeliner_fw_test 100 1", intf);
+			if (system(buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"wifitool beeliner_fw_test 100 1 failed");
 			}
 		} else if (strcasecmp(val, "Disable") == 0) {
 			snprintf(buf, sizeof(buf), "iwconfig %s rts 2347",
@@ -4218,6 +4255,7 @@ static int cmd_sta_set_11n(struct sigma_dut *dut, struct sigma_conn *conn,
 	} else if (!mcs32 && rate) {
 		switch (get_driver_type()) {
 		case DRIVER_ATHEROS:
+			novap_reset(dut, intf);
 			ath_sta_set_11nrates(dut, intf, rate);
 			break;
 		default:
@@ -4404,6 +4442,11 @@ static int cmd_sta_set_wireless_vht(struct sigma_dut *dut,
 		strncpy(token, val, sizeof(token));
 		token[sizeof(token) - 1] = '\0';
 		result = strtok(token, ";");
+		if (!result) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"VHT NSS not specified");
+			return 0;
+		}
 		nss = atoi(result);
 
 		snprintf(buf, sizeof(buf), "iwpriv %s nss %d", intf, nss);
@@ -4420,6 +4463,11 @@ static int cmd_sta_set_wireless_vht(struct sigma_dut *dut,
 		}
 		result = strtok(result, "-");
 		result = strtok(NULL, "-");
+		if (!result) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"VHT MCS not specified");
+			return 0;
+		}
 		mcs = atoi(result);
 
 		snprintf(buf, sizeof(buf), "iwpriv %s vhtmcs %d", intf, mcs);
@@ -6427,6 +6475,8 @@ static int ath_sta_set_rfeature_vht(const char *intf, struct sigma_dut *dut,
 	const char *val;
 	char *token, *result;
 
+	novap_reset(dut, intf);
+
 	val = get_param(cmd, "nss_mcs_opt");
 	if (val) {
 		/* String (nss_operating_mode; mcs_operating_mode) */
@@ -7250,6 +7300,7 @@ static int cmd_sta_osu(struct sigma_dut *dut, struct sigma_conn *conn,
 		       name ? "-O'" : "", name ? name : "",
 		       name ? "'" : "");
 
+	hs2_set_policy(dut);
 	if (run_hs20_osu(dut, buf) < 0) {
 		FILE *f;
 
@@ -7312,7 +7363,6 @@ report:
 
 	snprintf(buf, sizeof(buf), "SSID,%s,BSSID,%s", ssid, bssid);
 	send_resp(dut, conn, SIGMA_COMPLETE, buf);
-	hs2_set_policy(dut);
 	return 0;
 }
 
