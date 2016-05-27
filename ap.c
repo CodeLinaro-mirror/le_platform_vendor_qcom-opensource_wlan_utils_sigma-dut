@@ -206,6 +206,12 @@ static void ath_config_rts_force(struct sigma_dut *dut, const char *ifname,
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"iwconfig rts 64 failed");
 		}
+		snprintf(buf, sizeof(buf), "wifitool %s beeliner_fw_test 100 1",
+			 ifname);
+		if (system(buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"wifitool beeliner_fw_test 100 1 failed");
+		}
 	} else if (strcasecmp(val, "disable") == 0) {
 		dut->ap_sig_rts = 2;
 		snprintf(buf, sizeof(buf), "iwconfig %s rts 2347", ifname);
@@ -274,7 +280,6 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 {
 	/* const char *name = get_param(cmd, "NAME"); */
 	/* const char *ifname = get_param(cmd, "INTERFACE"); */
-	/* const char *reg_mode = get_param(cmd, "regulatory_mode"); */
 	const char *val;
 	unsigned int wlan_tag = 1;
 	char *ifname = get_main_ifname();
@@ -295,6 +300,12 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			return -1;
 		snprintf(dut->ap_countrycode, sizeof(dut->ap_countrycode),
 			 "%s", val);
+	}
+
+	val = get_param(cmd, "regulatory_mode");
+	if (val) {
+		if (strcasecmp(val, "11d") == 0 || strcasecmp(val, "11h") == 0)
+			dut->ap_regulatory_mode = AP_80211D_MODE_ENABLED;
 	}
 
 	val = get_param(cmd, "SSID");
@@ -320,6 +331,23 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			pos++;
 			dut->ap_channel_1 = atoi(pos);
 		}
+	}
+
+	/* Overwrite the AP channel with DFS channel if configured */
+	val = get_param(cmd, "dfs_chan");
+	if (val) {
+		dut->ap_channel = atoi(val);
+	}
+
+	val = get_param(cmd, "dfs_mode");
+	if (val) {
+		if (strcasecmp(val, "Enable") == 0)
+			dut->ap_dfs_mode = AP_DFS_MODE_ENABLED;
+		else if (strcasecmp(val, "Disable") == 0)
+			dut->ap_dfs_mode = AP_DFS_MODE_DISABLED;
+		else
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported dfs_mode value: %s", val);
 	}
 
 	val = get_param(cmd, "MODE");
@@ -367,7 +395,16 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			dut->ap_mode = AP_11na;
 	}
 
-	/* TODO: WME */
+	val = get_param(cmd, "WME");
+	if (val) {
+		if (strcasecmp(val, "on") == 0)
+			dut->ap_wme = AP_WME_ON;
+		else if (strcasecmp(val, "off") == 0)
+			dut->ap_wme = AP_WME_OFF;
+		else
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported WME value: %s", val);
+	}
 
 	/* TODO: WMMPS */
 
@@ -797,6 +834,10 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 		}
 	}
 
+	val = get_param(cmd, "MU_NDPA_FrameFormat");
+	if (val)
+		dut->ap_ndpa_frame = atoi(val);
+
 	return 1;
 }
 
@@ -1037,6 +1078,19 @@ static int cmd_ap_set_security(struct sigma_dut *dut, struct sigma_conn *conn,
 		} else {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Unsupported PMF");
+			return 0;
+		}
+	}
+
+	val = get_param(cmd, "PreAuthentication");
+	if (val) {
+		if (strcasecmp(val, "disabled") == 0) {
+			dut->ap_rsn_preauth = 0;
+		} else if (strcasecmp(val, "enabled") == 0) {
+			dut->ap_rsn_preauth = 1;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported PreAuthentication value");
 			return 0;
 		}
 	}
@@ -1824,6 +1878,10 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 	snprintf(buf, sizeof(buf), "%d", dut->ap_add_sha256);
 	owrt_ap_set_vap(dut, vap_id, "add_sha256", buf);
 
+	/* Enable RSN preauthentication, if asked to */
+	snprintf(buf, sizeof(buf), "%d", dut->ap_rsn_preauth);
+	owrt_ap_set_vap(dut, vap_id, "rsn_preauth", buf);
+
 	/* Hotspot 2.0 */
 	if (dut->ap_hs2) {
 		int ret;
@@ -2003,6 +2061,15 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 		owrt_ap_set_vap(dut, vap_id, "vhtmubfee", "1");
 		owrt_ap_set_vap(dut, vap_id, "vhtmubfer", "1");
 	}
+
+	if (dut->ap_tx_stbc) {
+		/* STBC and beamforming are mutually exclusive features */
+		owrt_ap_set_vap(dut, vap_id, "implicitbf", "0");
+	}
+
+	/* enable dfsmode */
+	snprintf(buf, sizeof(buf), "%d", dut->ap_dfs_mode);
+	owrt_ap_set_vap(dut, vap_id, "doth", buf);
 
 	return 1;
 }
@@ -2459,6 +2526,12 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 			 dut->ap_countrycode);
 		run_ndc(dut, buf);
 	}
+
+	if (dut->ap_regulatory_mode == AP_80211D_MODE_ENABLED)
+		run_ndc(dut, "ndc softap qccmd set ieee80211d=1");
+
+	if (dut->ap_dfs_mode == AP_DFS_MODE_ENABLED)
+		run_ndc(dut, "ndc softap qccmd set ieee80211h=1");
 
 	run_ndc(dut, "ndc softap startap");
 
@@ -3692,6 +3765,36 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 				"l2tif brif failed");
 		sigma_dut_print(dut, DUT_MSG_INFO, "Enabled l2tif");
 	}
+
+	if (dut->ap_ndpa_frame == 0) {
+		snprintf(buf, sizeof(buf),
+			 "wifitool %s beeliner_fw_test 117 192", ifname);
+		if (system(buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"wifitool beeliner_fw_test 117 192 failed");
+		}
+		snprintf(buf, sizeof(buf),
+			 "wifitool %s beeliner_fw_test 118 192", ifname);
+		if (system(buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"wifitool beeliner_fw_test 117 192 failed");
+		}
+	} else if (dut->ap_ndpa_frame == 1) {
+		/* Driver default - no changes needed */
+	} else if (dut->ap_ndpa_frame == 2) {
+		snprintf(buf, sizeof(buf),
+			 "wifitool %s beeliner_fw_test 115 1", ifname);
+		if (system(buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"wifitool beeliner_fw_test 117 192 failed");
+		}
+		snprintf(buf, sizeof(buf),
+			 "wifitool %s beeliner_fw_test 116 1", ifname);
+		if (system(buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"wifitool beeliner_fw_test 117 192 failed");
+		}
+	}
 }
 
 
@@ -4453,6 +4556,9 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (dut->ap_proxy_arp)
 		fprintf(f, "proxy_arp=1\n");
 
+	if (dut->ap_wme)
+		fprintf(f, "wmm_enabled=1\n");
+
 	if (dut->ap_hs2) {
 		if (dut->ap_bss_load) {
 			char *bss_load;
@@ -4640,11 +4746,10 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (drv == DRIVER_QNXNTO) {
 		snprintf(buf, sizeof(buf),
-			 "hostapd -B %s%s -P %s %s%s" SIGMA_TMPDIR
+			 "hostapd -B %s%s %s%s" SIGMA_TMPDIR
 			 "/sigma_dut-ap.conf",
 			 dut->hostapd_debug_log ? "-ddKt -f " : "",
 			 dut->hostapd_debug_log ? dut->hostapd_debug_log : "",
-			 sigma_hapd_ctrl,
 			 dut->hostapd_entropy_log ? " -e" : "",
 			 dut->hostapd_entropy_log ? dut->hostapd_entropy_log :
 			 "");
@@ -4952,9 +5057,18 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->ap_txBF = 0;
 	dut->ap_chwidth = AP_AUTO;
 
+	dut->ap_rsn_preauth = 0;
 	dut->ap_wpsnfc = 0;
 	dut->ap_bss_load = -1;
 	dut->ap_p2p_cross_connect = -1;
+
+	dut->ap_regulatory_mode = AP_80211D_MODE_DISABLED;
+	dut->ap_dfs_mode = AP_DFS_MODE_DISABLED;
+
+	if (dut->program == PROGRAM_HT || dut->program == PROGRAM_VHT)
+		dut->ap_wme = AP_WME_ON;
+	else
+		dut->ap_wme = AP_WME_OFF;
 
 	if (dut->program == PROGRAM_HS2 || dut->program == PROGRAM_HS2_R2) {
 		int i;
@@ -5038,6 +5152,7 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_mode = AP_11ac;
 		dut->ap_channel = 36;
 		dut->ap_ampdu = 0;
+		dut->ap_ndpa_frame = 1;
 		if (dut->device_type == AP_testbed) {
 			dut->ap_amsdu = 2;
 			dut->ap_ldpc = 2;
@@ -5056,6 +5171,8 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_chwidth = AP_80;
 		dut->ap_tx_stbc = 1;
 		dut->ap_dyn_bw_sig = AP_DYN_BW_SGNL_ENABLED;
+		if (get_openwrt_driver_type() == OPENWRT_DRIVER_ATHEROS)
+			dut->ap_dfs_mode = AP_DFS_MODE_ENABLED;
 		if (get_driver_type() == DRIVER_ATHEROS)
 			ath_reset_vht_defaults(dut);
 	}
@@ -6617,7 +6734,7 @@ static int ath_ndpa_stainfo_mac(struct sigma_dut *dut, const char *ifname,
 }
 
 
-static void novap_reset(struct sigma_dut *dut, const char *ifname)
+void novap_reset(struct sigma_dut *dut, const char *ifname)
 {
 	char buf[60];
 
@@ -6678,6 +6795,50 @@ static int ath_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int wcn_vht_chnum_band(struct sigma_dut *dut, const char *ifname,
+			      const char *val)
+{
+	char *token, *result;
+	int channel = 36;
+	char buf[100];
+
+	/* Extract the channel info */
+	token = strdup(val);
+	if (!token)
+		return -1;
+	result = strtok(token, ";");
+	if (result)
+		channel = atoi(result);
+
+	/* Issue the channel switch command */
+	snprintf(buf, sizeof(buf), "iwpriv %s setChanChange %d",
+		 ifname, channel);
+	if (system(buf) != 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"iwpriv setChanChange failed!");
+	}
+
+	free(token);
+	return 0;
+}
+
+
+static int wcn_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd)
+{
+	const char *val;
+	char *ifname;
+
+	ifname = get_main_ifname();
+
+	val = get_param(cmd, "chnum_band");
+	if (val && wcn_vht_chnum_band(dut, ifname, val) < 0)
+		return -1;
+
+	return 1;
+}
+
+
 static int cmd_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd)
 {
@@ -6696,6 +6857,8 @@ static int cmd_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
 				  "errorCode,Unsupported ap_set_rfeature with the current openwrt driver");
 			return 0;
 		}
+	case DRIVER_WCN:
+		return wcn_ap_set_rfeature(dut, conn, cmd);
 	default:
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Unsupported ap_set_rfeature with the current driver");
@@ -6720,6 +6883,7 @@ void ap_register_cmds(void)
 	sigma_dut_reg_cmd("ap_set_11n_wireless", NULL, cmd_ap_set_wireless);
 	sigma_dut_reg_cmd("ap_set_11n", NULL, cmd_ap_set_wireless);
 	sigma_dut_reg_cmd("ap_set_11d", NULL, cmd_ap_set_wireless);
+	sigma_dut_reg_cmd("ap_set_11h", NULL, cmd_ap_set_wireless);
 	sigma_dut_reg_cmd("ap_set_security", NULL, cmd_ap_set_security);
 	sigma_dut_reg_cmd("ap_set_apqos", NULL, cmd_ap_set_apqos);
 	sigma_dut_reg_cmd("ap_set_staqos", NULL, cmd_ap_set_staqos);

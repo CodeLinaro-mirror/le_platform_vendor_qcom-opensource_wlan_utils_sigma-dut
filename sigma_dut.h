@@ -200,6 +200,10 @@ struct sigma_stream {
 	int num_retry;
 	char ifname[IFNAMSIZ]; /* ifname from the command */
 	struct sigma_dut *dut; /* for traffic agent thread to access context */
+	/* console */
+	char test_name[9]; /* test case name */
+	int can_quit;
+	int reset;
 };
 
 #endif /* CONFIG_TRAFFIC_AGENT */
@@ -356,6 +360,7 @@ struct sigma_dut {
 		AP2_OSEN
 	} ap2_key_mgmt;
 	int ap_add_sha256;
+	int ap_rsn_preauth;
 	enum ap_pmf {
 		AP_PMF_DISABLED,
 		AP_PMF_OPTIONAL,
@@ -426,6 +431,15 @@ struct sigma_dut {
 	} ap_vht_chwidth;
 	int ap_txBF;
 	int ap_mu_txBF;
+	enum ap_regulatory_mode {
+		AP_80211D_MODE_DISABLED,
+		AP_80211D_MODE_ENABLED,
+	} ap_regulatory_mode;
+	enum ap_dfs_mode {
+		AP_DFS_MODE_DISABLED,
+		AP_DFS_MODE_ENABLED,
+	} ap_dfs_mode;
+	int ap_ndpa_frame;
 
 	const char *hostapd_debug_log;
 
@@ -451,6 +465,11 @@ struct sigma_dut {
 	char ap_countrycode[3];
 
 	int ap_wpsnfc;
+
+	enum ap_wme {
+		AP_WME_OFF,
+		AP_WME_ON,
+	} ap_wme;
 
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
@@ -501,6 +520,7 @@ struct sigma_dut {
 
 	int iface_down_on_reset;
 	int write_stats; /* traffic stream e2e*.txt files */
+	int sim_no_username; /* do not set SIM username to use real SIM */
 };
 
 
@@ -584,6 +604,7 @@ void sniffer_close(struct sigma_dut *dut);
 void ath_disable_txbf(struct sigma_dut *dut, const char *intf);
 void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 			   const char *val);
+void novap_reset(struct sigma_dut *dut, const char *ifname);
 
 /* sta.c */
 int set_ps(const char *intf, struct sigma_dut *dut, int enabled);
@@ -602,6 +623,7 @@ enum sigma_program sigma_program_to_enum(const char *prog);
 
 /* uapsd_stream.c */
 void receive_uapsd(struct sigma_stream *s);
+void send_uapsd_console(struct sigma_stream *s);
 
 /* nan.c */
 int nan_preset_testparameters(struct sigma_dut *dut, struct sigma_conn *conn,
