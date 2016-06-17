@@ -24,6 +24,7 @@
 #include "wpa_helpers.h"
 #ifdef ANDROID
 #include <hardware_legacy/wifi.h>
+#include <private/android_filesystem_config.h>
 #endif /* ANDROID */
 
 /* Temporary files for ap_send_addba_req */
@@ -553,6 +554,11 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			return -1;
 		strcpy(token, val);
 		result = strtok_r(token, ";", &saveptr);
+		if (!result) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"VHT NSS not specified");
+			return 0;
+		}
 		nss = atoi(result);
 		result = strtok_r(NULL, ";", &saveptr);
 		if (result == NULL) {
@@ -562,6 +568,11 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 		}
 		result = strtok_r(result, "-", &saveptr);
 		result = strtok_r(NULL, "-", &saveptr);
+		if (!result) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"VHT MCS not specified");
+			return 0;
+		}
 		mcs = atoi(result);
 		switch (nss) {
 		case 1:
@@ -2058,10 +2069,8 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 		owrt_ap_set_vap(dut, vap_id, "vhtsubfer", "1");
 	}
 
-	if (dut->ap_mu_txBF) {
-		owrt_ap_set_vap(dut, vap_id, "vhtmubfee", "1");
+	if (dut->ap_mu_txBF)
 		owrt_ap_set_vap(dut, vap_id, "vhtmubfer", "1");
-	}
 
 	if (dut->ap_tx_stbc) {
 		/* STBC and beamforming are mutually exclusive features */
@@ -4404,11 +4413,12 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	     drv == DRIVER_LINUX_WCN) &&
 	    (dut->ap_mode == AP_11ng || dut->ap_mode == AP_11na)) {
 		fprintf(f, "ieee80211n=1\n");
+		fprintf(f, "ht_capab=");
 		if (dut->ap_mode == AP_11ng && dut->ap_chwidth == AP_40) {
 			if (dut->ap_channel >= 1 && dut->ap_channel <= 7)
-				fprintf(f, "ht_capab=[HT40+]\n");
+				fprintf(f, "[HT40+]");
 			else if (dut->ap_channel >= 8 && dut->ap_channel <= 11)
-				fprintf(f, "ht_capab=[HT40-]\n");
+				fprintf(f, "[HT40-]");
 		}
 
 		/* configure ht_capab based on channel width */
@@ -4417,10 +4427,15 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		     (dut->ap_chwidth == AP_AUTO &&
 		      dut->default_ap_chwidth == AP_40))) {
 			if (is_ht40plus_chan(dut->ap_channel))
-				fprintf(f, "ht_capab=[HT40+]\n");
+				fprintf(f, "[HT40+]");
 			else if (is_ht40minus_chan(dut->ap_channel))
-				fprintf(f, "ht_capab=[HT40-]\n");
+				fprintf(f, "[HT40-]");
 		}
+
+		if (dut->ap_tx_stbc)
+			fprintf(f, "[TX-STBC]");
+
+		fprintf(f, "\n");
 	}
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
@@ -4725,12 +4740,14 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		fprintf(f, "vht_oper_chwidth=%d\n", dut->ap_vht_chwidth);
 
 		if (dut->ap_sgi80 || dut->ap_txBF || dut->ap_ldpc ||
-		    dut->ap_tx_stbc) {
-			fprintf(f, "vht_capab=%s%s%s%s\n",
+		    dut->ap_tx_stbc || dut->ap_mu_txBF) {
+			fprintf(f, "vht_capab=%s%s%s%s%s\n",
 				dut->ap_sgi80 ? "[SHORT-GI-80]" : "",
-				dut->ap_txBF ? "[SU-BEAMFORMER]" : "",
+				dut->ap_txBF ?
+				"[SU-BEAMFORMER][SU-BEAMFORMEE][BF-ANTENNA-2][SOUNDING-DIMENSION-2]" : "",
 				dut->ap_ldpc ? "[RXLDPC]" : "",
-				dut->ap_tx_stbc ? "[TX-STBC-2BY1]" : "");
+				dut->ap_tx_stbc ? "[TX-STBC-2BY1]" : "",
+				dut->ap_mu_txBF ? "[MU-BEAMFORMER]" : "");
 		}
 	}
 
@@ -4756,6 +4773,19 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 #endif /* __QNXNTO__ */
 		}
 	}
+
+#ifdef ANDROID
+	/* Set proper conf file permissions so that hostapd process
+	 * can access it.
+	 */
+	if (chmod(SIGMA_TMPDIR "/sigma_dut-ap.conf",
+		  S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Error changing permissions");
+
+	if (chown(SIGMA_TMPDIR "/sigma_dut-ap.conf", -1, AID_WIFI) < 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR, "Error changing groupid");
+#endif /* ANDROID */
 
 	if (drv == DRIVER_QNXNTO) {
 		snprintf(buf, sizeof(buf),
@@ -5068,6 +5098,7 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->ap_sig_rts = 0;
 	dut->ap_rx_amsdu = 0;
 	dut->ap_txBF = 0;
+	dut->ap_mu_txBF = 0;
 	dut->ap_chwidth = AP_AUTO;
 
 	dut->ap_rsn_preauth = 0;
@@ -6579,6 +6610,11 @@ static int ath_vht_nss_mcs(struct sigma_dut *dut, const char *ifname,
 	if (!token)
 		return -1;
 	result = strtok_r(token, ";", &saveptr);
+	if (!result) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"VHT NSS not specified");
+		goto end;
+	}
 	if (strcasecmp(result, "def") != 0) {
 		nss = atoi(result);
 
@@ -6601,6 +6637,11 @@ static int ath_vht_nss_mcs(struct sigma_dut *dut, const char *ifname,
 	}
 
 	result = strtok_r(NULL, ";", &saveptr);
+	if (!result) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"VHT MCS not specified");
+		goto end;
+	}
 	if (strcasecmp(result, "def") == 0) {
 		if (dut->device_type == AP_testbed && dut->ap_sgi80 == 1) {
 			snprintf(buf, sizeof(buf), "iwpriv %s vhtmcs 7",
@@ -6626,6 +6667,7 @@ static int ath_vht_nss_mcs(struct sigma_dut *dut, const char *ifname,
 		}
 	}
 
+end:
 	free(token);
 	return 0;
 }
