@@ -276,6 +276,28 @@ static int run_hostapd_cli(struct sigma_dut *dut, char *buf)
 }
 
 
+static int ath_set_lci_config(struct sigma_dut *dut, const char *val,
+			      struct sigma_cmd *cmd)
+{
+	FILE *f;
+	int i;
+
+	f = fopen("/tmp/lci_cfg.txt", "w");
+	if (!f) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to open /tmp/lci_cfg.txt");
+		return -1;
+	}
+
+	for (i = 2; i < cmd->count; i++)
+		fprintf(f, "%s = %s \n", cmd->params[i], cmd->values[i]);
+	fprintf(f, "\n");
+	fclose(f);
+
+	return 0;
+}
+
+
 static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd)
 {
@@ -850,6 +872,77 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (val)
 		dut->ap_ndpa_frame = atoi(val);
 
+	val = get_param(cmd, "interworking");
+	if (val && strcmp(val, "1") == 0)
+		dut->ap_interworking = 1;
+
+	val = get_param(cmd, "GAS_CB_DELAY");
+	if (val)
+		dut->ap_gas_cb_delay = atoi(val);
+
+	val = get_param(cmd, "LCI");
+	if (val) {
+		if (strlen(val) > sizeof(dut->ap_val_lci) - 1)
+			return -1;
+		dut->ap_lci = 1;
+		snprintf(dut->ap_val_lci, sizeof(dut->ap_val_lci), "%s", val);
+		ath_set_lci_config(dut, val, cmd);
+	}
+
+	val = get_param(cmd, "InfoZ");
+	if (val) {
+		if (strlen(val) > sizeof(dut->ap_infoz) - 1)
+			return -1;
+		snprintf(dut->ap_infoz, sizeof(dut->ap_infoz), "%s", val);
+	}
+
+	val = get_param(cmd, "LocCivicAddr");
+	if (val) {
+		if (strlen(val) > sizeof(dut->ap_val_lcr) - 1)
+			return -1;
+		dut->ap_lcr = 1;
+		snprintf(dut->ap_val_lcr, sizeof(dut->ap_val_lcr), "%s", val);
+		if (dut->ap_lci == 0)
+			ath_set_lci_config(dut, val, cmd);
+	}
+
+	val = get_param(cmd, "NeighAPBSSID");
+	if (val) {
+		if (dut->ap_neighap < 3) {
+			if (parse_mac_address(
+				    dut, val,
+				    dut->ap_val_neighap[dut->ap_neighap]) < 0) {
+				send_resp(dut, conn, SIGMA_INVALID,
+					  "Failed to parse MAC address");
+				return 0;
+			}
+			dut->ap_neighap++;
+			if (dut->ap_lci == 1)
+				dut->ap_scan = 1;
+		}
+	}
+
+	val = get_param(cmd, "OpChannel");
+	if (val) {
+		if (dut->ap_opchannel < 3) {
+			dut->ap_val_opchannel[dut->ap_opchannel] = atoi(val);
+			dut->ap_opchannel++;
+		}
+	}
+
+	val = get_param(cmd, "URI-FQDNdescriptor");
+	if (val) {
+		if (strcasecmp(val, "HELD") == 0) {
+			dut->ap_fqdn_held = 1;
+		} else if (strcasecmp(val, "SUPL") == 0) {
+			dut->ap_fqdn_supl = 1;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported URI-FQDNdescriptor");
+			return 0;
+		}
+	}
+
 	return 1;
 }
 
@@ -932,11 +1025,86 @@ static int ath_ap_send_addba_req(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int ath10k_debug_enable_addba_req(struct sigma_dut *dut, int tid,
+					 const char *sta_mac,
+					 const char *dir_path)
+{
+	DIR *dir;
+	struct dirent *entry;
+	char buf[128], path[128];
+	int ret = 0;
+
+	dir = opendir(dir_path);
+	if (!dir)
+		return 0;
+
+	while ((entry = readdir(dir))) {
+		ret = 1;
+
+		if (strcmp(entry->d_name, ".") == 0 ||
+		    strcmp(entry->d_name, "..") == 0)
+			continue;
+
+		snprintf(path, sizeof(path) - 1, "%s/%s",
+			 dir_path, entry->d_name);
+		path[sizeof(path) - 1] = 0;
+
+		if (strcmp(entry->d_name, sta_mac) == 0) {
+			snprintf(buf, sizeof(buf), "echo 1 > %s/aggr_mode",
+				 path);
+			if (system(buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to set aggr mode for ath10k");
+			}
+
+			snprintf(buf, sizeof(buf), "echo %d 32 > %s/addba",
+				 tid, path);
+			if (system(buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to set addbareq for ath10k");
+			}
+
+			break;
+		}
+
+		/* Recursively search subdirectories */
+		ath10k_debug_enable_addba_req(dut, tid, sta_mac, path);
+	}
+
+	closedir(dir);
+
+	return ret;
+}
+
+
+static int ath10k_ap_send_addba_req(struct sigma_dut *dut,
+				    struct sigma_cmd *cmd)
+{
+	const char *val;
+	int tid = 0;
+
+	val = get_param(cmd, "TID");
+	if (val)
+		tid = atoi(val);
+
+	val = get_param(cmd, "sta_mac_address");
+	if (!val) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to parse station MAC address");
+		return 0;
+	}
+
+	return ath10k_debug_enable_addba_req(dut, tid, val,
+					     "/sys/kernel/debug/ieee80211");
+}
+
+
 static int cmd_ap_send_addba_req(struct sigma_dut *dut, struct sigma_conn *conn,
 				 struct sigma_cmd *cmd)
 {
 	/* const char *name = get_param(cmd, "NAME"); */
 	/* const char *ifname = get_param(cmd, "INTERFACE"); */
+	struct stat s;
 
 	switch (get_driver_type()) {
 	case DRIVER_ATHEROS:
@@ -950,6 +1118,16 @@ static int cmd_ap_send_addba_req(struct sigma_dut *dut, struct sigma_conn *conn,
 				  "errorCode,ap_send_addba_req not supported with this driver");
 			return 0;
 		}
+	case DRIVER_WCN:
+	case DRIVER_LINUX_WCN:
+		/* AP automatically sends ADDBA request after association. */
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"ap_send_addba_req command ignored");
+		return 1;
+	case DRIVER_MAC80211:
+		if (stat("/sys/module/ath10k_core", &s) == 0)
+			return ath10k_ap_send_addba_req(dut, cmd);
+		/* fall through */
 	default:
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,ap_send_addba_req not supported with this driver");
@@ -1222,7 +1400,7 @@ static void owrt_ap_set_vap(struct sigma_dut *dut, int id, const char *key,
 static void owrt_ap_set_list_vap(struct sigma_dut *dut, int id,
 				 const char *key, const char *val)
 {
-	char buf[256];
+	char buf[1024];
 
 	if (val == NULL) {
 		snprintf(buf, sizeof(buf),
@@ -1832,13 +2010,13 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 
 			if (dut->ap_cipher == AP_CCMP_TKIP) {
 				strncat(buf, "+ccmp+tkip",
-					sizeof(buf) - sizeof("+ccmp+tkip"));
+					sizeof(buf) - strlen(buf) - 1);
 			} else if (dut->ap_cipher == AP_TKIP) {
 				strncat(buf, "+tkip",
-					sizeof(buf) - sizeof("+tkip"));
+					sizeof(buf) - strlen(buf) - 1);
 			} else {
 				strncat(buf, "+ccmp",
-					sizeof(buf) - sizeof("+ccmp"));
+					sizeof(buf) - strlen(buf) - 1);
 			}
 
 			owrt_ap_set_vap(dut, vap_count, "encryption", buf);
@@ -1858,11 +2036,14 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 			}
 
 			if (dut->ap_cipher == AP_CCMP_TKIP) {
-				strncat(buf, "+ccmp+tkip", sizeof(buf));
+				strncat(buf, "+ccmp+tkip",
+					sizeof(buf) - strlen(buf) - 1);
 			} else if (dut->ap_cipher == AP_TKIP) {
-				strncat(buf, "+tkip", sizeof(buf));
+				strncat(buf, "+tkip",
+					sizeof(buf) - strlen(buf) - 1);
 			} else {
-				strncat(buf, "+ccmp", sizeof(buf));
+				strncat(buf, "+ccmp",
+					sizeof(buf) - strlen(buf) - 1);
 			}
 			owrt_ap_set_vap(dut, vap_count, "encryption", buf);
 			snprintf(buf, sizeof(buf), "%s", dut->ap_radius_ipaddr);
@@ -2080,6 +2261,72 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 	/* enable dfsmode */
 	snprintf(buf, sizeof(buf), "%d", dut->ap_dfs_mode);
 	owrt_ap_set_vap(dut, vap_id, "doth", buf);
+
+	if (dut->program == PROGRAM_LOC && dut->ap_interworking) {
+		char anqpval[1024];
+
+		owrt_ap_set_vap(dut, vap_id, "interworking", "1");
+
+		if (dut->ap_lci == 1 && strlen(dut->ap2_ssid) > 0) {
+			unsigned char addr[6];
+			unsigned char addr2[6];
+			struct ifreq ifr;
+			char *ifname;
+			int s;
+
+			s = socket(AF_INET, SOCK_DGRAM, 0);
+			if (s < 0) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to open socket");
+				return -1;
+			}
+
+			memset(&ifr, 0, sizeof(ifr));
+			ifname = "ath0";
+			strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+			if (ioctl(s, SIOCGIFHWADDR, &ifr) < 0) {
+				perror("ioctl");
+				close(s);
+				return -1;
+			}
+			memcpy(addr, ifr.ifr_hwaddr.sa_data, 6);
+
+			memset(&ifr, 0, sizeof(ifr));
+			ifname = "ath01";
+			strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+			if (ioctl(s, SIOCGIFHWADDR, &ifr) < 0) {
+				perror("ioctl");
+				close(s);
+				return -1;
+			}
+			close(s);
+			memcpy(addr2, ifr.ifr_hwaddr.sa_data, 6);
+
+			sprintf(anqpval,
+				"'265:0010%s%s060101070d00%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x'",
+				dut->ap_val_lci, dut->ap_infoz,
+				addr[0], addr[1], addr[2],
+				addr[3], addr[4], addr[5],
+				addr2[0], addr2[1], addr2[2],
+				addr2[3], addr2[4], addr2[5]);
+
+			owrt_ap_set_list_vap(dut, vap_id, "anqp_elem", anqpval);
+		} else if (dut->ap_lci == 1) {
+			sprintf(anqpval, "'265:0010%s%s060101'",
+				dut->ap_val_lci, dut->ap_infoz);
+			owrt_ap_set_list_vap(dut, vap_id, "anqp_elem", anqpval);
+		}
+
+		if (dut->ap_lcr == 1) {
+			sprintf(anqpval, "'266:0000b2555302ae%s'",
+				dut->ap_val_lcr);
+			owrt_ap_set_list_vap(dut, vap_id, "anqp_elem", anqpval);
+		}
+
+		if (dut->ap_fqdn_held == 1 && dut->ap_fqdn_supl == 1)
+			owrt_ap_set_list_vap(dut, vap_id, "anqp_elem",
+					     "'267:00110168656c642e6578616d706c652e636f6d0011027375706c2e6578616d706c652e636f6d'");
+	}
 
 	return 1;
 }
@@ -3035,14 +3282,17 @@ static int cmd_ath_ap_anqpserver_start(struct sigma_dut *dut)
 		char *next, *start, *dnbuf, *dn1, *anqp_dn;
 		int len, dn_len_max;
 		dnbuf = strdup(dut->ap_domain_name_list);
-		if (dnbuf == NULL)
+		if (dnbuf == NULL) {
+			fclose(f);
 			return 0;
+		}
 
 		len = strlen(dnbuf);
 		dn_len_max = 50 + len*2;
 		anqp_dn = malloc(dn_len_max);
 		if (anqp_dn == NULL) {
 			free(dnbuf);
+			fclose(f);
 			return -1;
 		}
 		start = dnbuf;
@@ -3059,6 +3309,7 @@ static int cmd_ath_ap_anqpserver_start(struct sigma_dut *dut)
 			if (hexstr == NULL) {
 				free(dnbuf);
 				free(anqp_dn);
+				fclose(f);
 				return -1;
 			}
 			ascii2hexstr(start, hexstr);
@@ -3375,7 +3626,7 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 	const char *basedev = "wifi1";
 	const char *ifname = dut->ap_is_dual ? "ath1" : "ath0";
 	int i;
-	char buf[100];
+	char buf[300];
 
 	if (dut->ap_countrycode[0]) {
 		snprintf(buf, sizeof(buf), "iwpriv %s setCountry %s",
@@ -3812,6 +4063,149 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"wifitool beeliner_fw_test 117 192 failed");
 		}
+	}
+
+	if (dut->ap_rtt == 1) {
+		snprintf(buf, sizeof(buf), "iwpriv %s enable_rtt 1", ifname);
+		run_system(dut, buf);
+	}
+
+	if (dut->ap_lci == 1) {
+		snprintf(buf, sizeof(buf), "iwpriv %s enable_lci 1", ifname);
+		run_system(dut, buf);
+	}
+
+	if (dut->ap_lcr == 1) {
+		snprintf(buf, sizeof(buf), "iwpriv %s enable_lcr 1", ifname);
+		run_system(dut, buf);
+	}
+
+	if (dut->ap_rrm == 1) {
+		snprintf(buf, sizeof(buf), "iwpriv %s rrm 1", ifname);
+		run_system(dut, buf);
+	}
+
+	if (dut->ap_lci == 1 || dut->ap_lcr == 1) {
+		run_system(dut, "wpc -l /tmp/lci_cfg.txt");
+	}
+
+	if (dut->ap_neighap >= 1 && dut->ap_lci == 0) {
+		FILE *f;
+
+		f = fopen("/tmp/nbr_report.txt", "w");
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to open /tmp/nbr_report.txt");
+			return;
+		}
+
+		fprintf(f,
+			"ap_1 = 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x00 0x3c 0x00 0x00 0x80 0x%x 0x09 0x06 0x03 0x02 0x2a 0x00\n",
+			dut->ap_val_neighap[0][0], dut->ap_val_neighap[0][1],
+			dut->ap_val_neighap[0][2], dut->ap_val_neighap[0][3],
+			dut->ap_val_neighap[0][4], dut->ap_val_neighap[0][5],
+			dut->ap_val_opchannel[0]);
+		fclose(f);
+
+		f = fopen("/tmp/ftmrr.txt", "w");
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to open /tmp/ftmrr.txt");
+			return;
+		}
+
+		fprintf(f,
+			"ap_1 = 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x00 0x3c 0x00 0x00 0x80 0x%x 0x09 0x06 0x03 0x02 0x2a 0x00\n",
+			dut->ap_val_neighap[0][0], dut->ap_val_neighap[0][1],
+			dut->ap_val_neighap[0][2], dut->ap_val_neighap[0][3],
+			dut->ap_val_neighap[0][4], dut->ap_val_neighap[0][5],
+			dut->ap_val_opchannel[0]);
+		fclose(f);
+	}
+
+	if (dut->ap_neighap >= 2 && dut->ap_lci == 0) {
+		FILE *f;
+
+		f = fopen("/tmp/nbr_report.txt", "a");
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to open /tmp/nbr_report.txt");
+			return;
+		}
+		fprintf(f,
+			"ap_2 = 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x00 0x3c 0x00 0x00 0x80 0x%x 0x09 0x06 0x03 0x02 0x6a 0x00\n",
+			dut->ap_val_neighap[1][0], dut->ap_val_neighap[1][1],
+			dut->ap_val_neighap[1][2], dut->ap_val_neighap[1][3],
+			dut->ap_val_neighap[1][4], dut->ap_val_neighap[1][5],
+			dut->ap_val_opchannel[1]);
+		fclose(f);
+
+		f = fopen("/tmp/ftmrr.txt", "a");
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to open /tmp/ftmrr.txt");
+			return;
+		}
+		fprintf(f,
+			"ap_2 = 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x00 0x3c 0x00 0x00 0x80 0x%x 0x09 0x06 0x03 0x02 0x6a 0x00\n",
+			dut->ap_val_neighap[1][0], dut->ap_val_neighap[1][1],
+			dut->ap_val_neighap[1][2], dut->ap_val_neighap[1][3],
+			dut->ap_val_neighap[1][4], dut->ap_val_neighap[1][5],
+			dut->ap_val_opchannel[1]);
+		fclose(f);
+	}
+
+	if (dut->ap_neighap >= 3 && dut->ap_lci == 0) {
+		FILE *f;
+
+		f = fopen("/tmp/nbr_report.txt", "a");
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to open /tmp/nbr_report.txt");
+			return;
+		}
+
+		fprintf(f,
+			"ap_3 = 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x00 0x3c 0x00 0x00 0x80 0x%x 0x09 0x06 0x03 0x02 0x9b 0x00\n",
+			dut->ap_val_neighap[2][0], dut->ap_val_neighap[2][1],
+			dut->ap_val_neighap[2][2], dut->ap_val_neighap[2][3],
+			dut->ap_val_neighap[2][4], dut->ap_val_neighap[2][5],
+			dut->ap_val_opchannel[2]);
+		fclose(f);
+
+		f = fopen("/tmp/ftmrr.txt", "a");
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to open /tmp/ftmrr.txt");
+			return;
+		}
+
+		fprintf(f,
+			"ap_3 = 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x00 0x3c 0x00 0x00 0x80 0x%x 0x09 0x06 0x03 0x02 0x9b 0x00\n",
+			dut->ap_val_neighap[2][0], dut->ap_val_neighap[2][1],
+			dut->ap_val_neighap[2][2], dut->ap_val_neighap[2][3],
+			dut->ap_val_neighap[2][4], dut->ap_val_neighap[2][5],
+			dut->ap_val_opchannel[2]);
+		fclose(f);
+	}
+
+	if (dut->ap_neighap) {
+		snprintf(buf, sizeof(buf), "iwpriv %s enable_rtt 1", ifname);
+		run_system(dut, buf);
+		snprintf(buf, sizeof(buf), "iwpriv %s enable_lci 1", ifname);
+		run_system(dut, buf);
+		snprintf(buf, sizeof(buf), "iwpriv %s enable_lcr 1", ifname);
+		run_system(dut, buf);
+		snprintf(buf, sizeof(buf), "iwpriv %s rrm 1", ifname);
+		run_system(dut, buf);
+	}
+
+	if (dut->ap_scan == 1) {
+		snprintf(buf, sizeof(buf), "iwpriv %s scanentryage 600",
+			 ifname);
+		run_system(dut, buf);
+		snprintf(buf, sizeof(buf), "iwlist %s scan", ifname);
+		run_system(dut, buf);
 	}
 }
 
@@ -4634,8 +5028,10 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		unsigned char bssid[6];
 		char ifname2[50];
 
-		if (get_hwaddr(ifname, bssid))
+		if (get_hwaddr(ifname, bssid)) {
+			fclose(f);
 			return -2;
+		}
 		bssid[0] |= 0x02;
 
 		snprintf(ifname2, sizeof(ifname2), "%s_1", ifname);
@@ -4700,6 +5096,7 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (check_channel(dut->ap_channel) < 0) {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Invalid channel");
+			fclose(f);
 			return 0;
 		}
 
@@ -4745,7 +5142,7 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut->ap_sgi80 ? "[SHORT-GI-80]" : "",
 				dut->ap_txBF ?
 				"[SU-BEAMFORMER][SU-BEAMFORMEE][BF-ANTENNA-2][SOUNDING-DIMENSION-2]" : "",
-				dut->ap_ldpc ? "[RXLDPC]" : "",
+				(dut->ap_ldpc == 1) ? "[RXLDPC]" : "",
 				dut->ap_tx_stbc ? "[TX-STBC-2BY1]" : "",
 				dut->ap_mu_txBF ? "[MU-BEAMFORMER]" : "");
 		}
@@ -5221,6 +5618,25 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 			ath_reset_vht_defaults(dut);
 	}
 
+	if (dut->program == PROGRAM_LOC) {
+		dut->ap_rrm = 1;
+		dut->ap_rtt = 1;
+		dut->ap_lci = 0;
+		dut->ap_val_lci[0] = '\0';
+		dut->ap_infoz[0] = '\0';
+		dut->ap_lcr = 0;
+		dut->ap_val_lcr[0] = '\0';
+		dut->ap_neighap = 0;
+		dut->ap_opchannel = 0;
+		dut->ap_scan = 0;
+		dut->ap2_ssid[0] = '\0';
+		dut->ap_fqdn_held = 0;
+		dut->ap_fqdn_supl = 0;
+		dut->ap_interworking = 0;
+		dut->ap_gas_cb_delay = 0;
+		dut->ap_msnt_type = 0;
+	}
+
 	if (kill_process(dut, "(hostapd)", 1, SIGTERM) == 0 ||
 	    system("killall hostapd") == 0) {
 		int i;
@@ -5560,11 +5976,13 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (res < 0) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Failed to "
 			  "inject frame");
+		close(s);
 		return 0;
 	}
 	if (res < pos - buf) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Only partial "
 			  "frame sent");
+		close(s);
 		return 0;
 	}
 
@@ -5709,6 +6127,58 @@ static int ath_ap_send_frame_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int ath_ap_send_frame_loc(struct sigma_dut *dut, struct sigma_conn *conn,
+				 struct sigma_cmd *cmd)
+{
+	const char *val;
+	FILE *f;
+	int rand_int = 0;
+
+	val = get_param(cmd, "MsntType");
+	if (val) {
+		if (dut->ap_msnt_type == 0)
+			dut->ap_msnt_type = atoi(val);
+
+		if (dut->ap_msnt_type != 5 && dut->ap_msnt_type != 2) {
+			dut->ap_msnt_type = atoi(val);
+			if (dut->ap_msnt_type == 1) {
+				val = get_param(cmd, "RandInterval");
+				if (val)
+					rand_int = atoi(val);
+				f = fopen("/tmp/ftmrr.txt", "a");
+				if (!f) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to open /tmp/ftmrr.txt");
+					return -1;
+				}
+
+				fprintf(f, "sta_mac = %s\n", cmd->values[3]);
+				fprintf(f, "meas_type = 0x10\nrand_inter = 0x%x\nmin_ap_count = 0x%s\ndialogtoken = 0x1\nnum_repetitions = 0x0\nmeas_token = 0xf\nmeas_req_mode = 0x00\n",
+					rand_int, cmd->values[7]);
+				fclose(f);
+				dut->ap_msnt_type = 5;
+				run_system(dut, "wpc -f /tmp/ftmrr.txt");
+			}
+		} else if (dut->ap_msnt_type == 5) {
+			run_system(dut, "wpc -f /tmp/ftmrr.txt");
+		} else if (dut->ap_msnt_type == 2) {
+			f = fopen("/tmp/wru.txt", "w");
+			if (!f) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to open /tmp/wru.txt");
+				return -1;
+			}
+
+			fprintf(f, "sta_mac = %s\n", cmd->values[3]);
+			fprintf(f, "meas_type = 0x08\ndialogtoken = 0x1\nnum_repetitions = 0x0\nmeas_token = 0x1\nmeas_req_mode = 0x00\nloc_subject = 0x01\n");
+			fclose(f);
+			run_system(dut, "wpc -w /tmp/wru.txt");
+		}
+	}
+	return 1;
+}
+
+
 static int ap_send_frame_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			     struct sigma_cmd *cmd)
 {
@@ -5733,6 +6203,29 @@ static int ap_send_frame_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int ap_send_frame_loc(struct sigma_dut *dut, struct sigma_conn *conn,
+			     struct sigma_cmd *cmd)
+{
+	switch (get_driver_type()) {
+	case DRIVER_ATHEROS:
+		return ath_ap_send_frame_loc(dut, conn, cmd);
+	case DRIVER_OPENWRT:
+		switch (get_openwrt_driver_type()) {
+		case OPENWRT_DRIVER_ATHEROS:
+			return ath_ap_send_frame_loc(dut, conn, cmd);
+		default:
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported ap_send_frame_loc with the current openwrt driver");
+			return 0;
+		}
+	default:
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Unsupported ap_send_frame_loc with the current driver");
+		return 0;
+	}
+}
+
+
 int cmd_ap_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 		      struct sigma_cmd *cmd)
 {
@@ -5750,6 +6243,8 @@ int cmd_ap_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 			return ap_send_frame_hs2(dut, conn, cmd);
 		if (strcasecmp(val, "VHT") == 0)
 			return ap_send_frame_vht(dut, conn, cmd);
+		if (strcasecmp(val, "LOC") == 0)
+			return ap_send_frame_loc(dut, conn, cmd);
 	}
 
 	val = get_param(cmd, "PMFFrameType");
@@ -6705,66 +7200,6 @@ static int ath_vht_chnum_band(struct sigma_dut *dut, const char *ifname,
 
 	free(token);
 	return 0;
-}
-
-
-static int parse_hex(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	if (c >= 'a' && c <= 'f')
-		return c - 'a' + 10;
-	if (c >= 'A' && c <= 'F')
-		return c - 'A' + 10;
-	return -1;
-}
-
-
-static int hex_byte(const char *str)
-{
-	int res1, res2;
-
-	res1 = parse_hex(str[0]);
-	if (res1 < 0)
-		return -1;
-	res2 = parse_hex(str[1]);
-	if (res2 < 0)
-		return -1;
-	return (res1 << 4) | res2;
-}
-
-
-static int parse_mac_address(struct sigma_dut *dut, const char *arg,
-			     unsigned char *addr)
-{
-	int i;
-	const char *pos = arg;
-
-	if (strlen(arg) != 17)
-		goto fail;
-
-	for (i = 0; i < ETH_ALEN; i++) {
-		int val;
-
-		val = hex_byte(pos);
-		if (val < 0)
-			goto fail;
-		addr[i] = val;
-		if (i + 1 < ETH_ALEN) {
-			pos += 2;
-			if (*pos != ':')
-				goto fail;
-			pos++;
-		}
-	}
-
-	return 0;
-
-fail:
-	sigma_dut_print(dut, DUT_MSG_ERROR,
-			"Invalid MAC address %s (expected format xx:xx:xx:xx:xx:xx)",
-			arg);
-	return -1;
 }
 
 

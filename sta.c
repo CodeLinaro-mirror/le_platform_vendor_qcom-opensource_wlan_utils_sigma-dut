@@ -635,8 +635,16 @@ static int start_dhcp_client(struct sigma_dut *dut, const char *ifname)
 	char buf[200];
 
 #ifdef ANDROID
-	snprintf(buf, sizeof(buf),
-		 "/system/bin/dhcpcd -b %s", ifname);
+	if (access("/system/bin/dhcpcd", F_OK) != -1) {
+		snprintf(buf, sizeof(buf),
+			 "/system/bin/dhcpcd -b %s", ifname);
+	} else if (access("/system/bin/dhcptool", F_OK) != -1) {
+		snprintf(buf, sizeof(buf), "/system/bin/dhcptool %s &", ifname);
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"DHCP client program missing");
+		return 0;
+	}
 #else /* ANDROID */
 	snprintf(buf, sizeof(buf),
 		 "dhclient -nw -pf /var/run/dhclient-%s.pid %s",
@@ -690,8 +698,10 @@ static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
 		return -1;
 
 	result = malloc(result_len);
-	if (result == NULL)
+	if (result == NULL) {
+		fclose(fp);
 		return -1;
+	}
 
 	len = fread(result, 1, result_len, fp);
 	fclose(fp);
@@ -2685,6 +2695,9 @@ static int cmd_sta_preset_testparameters(struct sigma_dut *dut,
 							    cmd);
 	}
 
+	if (val && strcasecmp(val, "LOC") == 0)
+		return loc_cmd_sta_preset_testparameters(dut, conn, cmd);
+
 #ifdef ANDROID_NAN
 	if (val && strcasecmp(val, "NAN") == 0)
 		return nan_cmd_sta_preset_testparameters(dut, conn, cmd);
@@ -4217,6 +4230,8 @@ static int cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (strcasecmp(program, "NAN") == 0)
 		return nan_cmd_sta_exec_action(dut, conn, cmd);
 #endif /* ANDROID_NAN */
+	if (strcasecmp(program, "Loc") == 0)
+		return loc_cmd_sta_exec_action(dut, conn, cmd);
 	send_resp(dut, conn, SIGMA_ERROR, "ErrorCode,Unsupported parameter");
 	return 0;
 }
@@ -5214,11 +5229,13 @@ static int sta_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (res < 0) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Failed to "
 			  "inject frame");
+		close(s);
 		return 0;
 	}
 	if (res < pos - buf) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Only partial "
 			  "frame sent");
+		close(s);
 		return 0;
 	}
 
@@ -5488,6 +5505,7 @@ static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
 			sigma_dut_print(dut, DUT_MSG_INFO, "Failed to get "
 					"%s IP address: %s",
 					ifname, strerror(errno));
+			close(s);
 			return -1;
 		} else {
 			memcpy(&saddr, &ifr.ifr_addr,
@@ -5563,6 +5581,7 @@ static int cmd_sta_send_frame_hs2_arpreply(struct sigma_dut *dut,
 	if (res < 0) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Failed to "
 			  "inject frame");
+		close(s);
 		return 0;
 	}
 
@@ -5940,6 +5959,8 @@ int cmd_sta_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 		return cmd_sta_send_frame_hs2(dut, conn, cmd);
 	if (val && strcasecmp(val, "VHT") == 0)
 		return cmd_sta_send_frame_vht(dut, conn, cmd);
+	if (val && strcasecmp(val, "LOC") == 0)
+		return loc_cmd_sta_send_frame(dut, conn, cmd);
 
 	val = get_param(cmd, "TD_DISC");
 	if (val) {
@@ -6422,6 +6443,7 @@ static int cmd_sta_set_rfeature_tdls(const char *intf, struct sigma_dut *dut,
 
 	switch (chsm) {
 	case CHSM_NOT_SET:
+		res = 1;
 		break;
 	case CHSM_ENABLE:
 		if (off_ch_num < 0) {
