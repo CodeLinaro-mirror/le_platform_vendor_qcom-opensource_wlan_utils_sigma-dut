@@ -12,6 +12,7 @@ OBJS += dev.c
 OBJS += ap.c
 OBJS += powerswitch.c
 OBJS += atheros.c
+OBJS += ftm.c
 
 # Initialize CFLAGS to limit to local module
 CFLAGS =
@@ -76,7 +77,7 @@ ver += $(filter L%,$(PLATFORM_VERSION))
 ver += $(filter M%,$(PLATFORM_VERSION))
 ver += $(filter 6.0%,$(PLATFORM_VERSION))
 ver += $(filter N%,$(PLATFORM_VERSION))
-ver += $(filter 7.0%,$(PLATFORM_VERSION))
+ver += $(filter 7.%,$(PLATFORM_VERSION))
 ifneq (,$(strip $(ver)))
 CFLAGS += -DANDROID43
 CFLAGS += -Wno-unused-parameter

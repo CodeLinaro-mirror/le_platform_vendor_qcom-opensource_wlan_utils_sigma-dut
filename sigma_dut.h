@@ -266,6 +266,7 @@ struct sigma_dut {
 
 	int go;
 	int p2p_client;
+	char *p2p_ifname;
 
 	int client_uapsd;
 
@@ -441,6 +442,22 @@ struct sigma_dut {
 	} ap_dfs_mode;
 	int ap_ndpa_frame;
 
+	int ap_lci;
+	char ap_val_lci[33];
+	char ap_infoz[17];
+	int ap_lcr;
+	char ap_val_lcr[400];
+	int ap_rrm;
+	int ap_rtt;
+	int ap_neighap; /* number of configured neighbor APs */
+	unsigned char ap_val_neighap[3][6];
+	int ap_opchannel; /* number of oper channels */
+	int ap_val_opchannel[3];
+	int ap_scan;
+	int ap_fqdn_held;
+	int ap_fqdn_supl;
+	int ap_msnt_type;
+
 	const char *hostapd_debug_log;
 
 #ifdef CONFIG_TRAFFIC_AGENT
@@ -493,6 +510,7 @@ struct sigma_dut {
 		PROGRAM_HT,
 		PROGRAM_VHT,
 		PROGRAM_NAN,
+		PROGRAM_LOC,
 	} program;
 
 	enum device_type {
@@ -521,6 +539,10 @@ struct sigma_dut {
 	int iface_down_on_reset;
 	int write_stats; /* traffic stream e2e*.txt files */
 	int sim_no_username; /* do not set SIM username to use real SIM */
+
+	const char *vendor_name; /* device_get_info vendor override */
+	const char *model_name; /* device_get_info model override */
+	const char *version_name; /* device_get_info version override */
 };
 
 
@@ -618,9 +640,13 @@ int ath_set_width(struct sigma_dut *dut, struct sigma_conn *conn,
 /* p2p.c */
 int p2p_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 			      struct sigma_cmd *cmd);
+void p2p_create_event_thread(struct sigma_dut *dut);
+void stop_event_thread(void);
 
-/* utils.h */
+/* utils.c */
 enum sigma_program sigma_program_to_enum(const char *prog);
+int parse_mac_address(struct sigma_dut *dut, const char *arg,
+		      unsigned char *addr);
 
 /* uapsd_stream.c */
 void receive_uapsd(struct sigma_stream *s);
@@ -641,6 +667,15 @@ int nan_cmd_sta_transmit_followup(struct sigma_dut *dut,
 void nan_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 int nan_cmd_sta_preset_testparameters(struct sigma_dut *dut,
+				      struct sigma_conn *conn,
+				      struct sigma_cmd *cmd);
+
+/* ftm.c */
+int loc_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
+			    struct sigma_cmd *cmd);
+int loc_cmd_sta_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
+			   struct sigma_cmd *cmd);
+int loc_cmd_sta_preset_testparameters(struct sigma_dut *dut,
 				      struct sigma_conn *conn,
 				      struct sigma_cmd *cmd);
 
