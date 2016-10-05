@@ -3939,7 +3939,7 @@ static int cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 
 #ifdef ANDROID_NAN
 	if (strcasecmp(program, "NAN") == 0)
-		return nan_cmd_sta_exec_action(dut, conn, cmd);
+		return nan_cmd_sta_get_parameter(dut, conn, cmd);
 #endif /* ANDROID_NAN */
 
 	send_resp(dut, conn, SIGMA_ERROR, "ErrorCode,Unsupported parameter");
@@ -4192,6 +4192,11 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 
 	dut->er_oper_performed = 0;
 	dut->er_oper_bssid[0] = '\0';
+
+	if (dut->program == PROGRAM_LOC) {
+		/* Disable Interworking by default */
+		wpa_command(get_station_ifname(), "SET interworking 0");
+	}
 
 	if (dut->program != PROGRAM_VHT)
 		return cmd_sta_p2p_reset(dut, conn, cmd);
