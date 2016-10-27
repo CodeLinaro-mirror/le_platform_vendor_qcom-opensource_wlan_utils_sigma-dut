@@ -685,7 +685,8 @@ static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
 {
 	char cmd[200], *result, *pos;
 	FILE *fp;
-	int len, tableid, result_len = 1000;
+	int tableid;
+	size_t len, result_len = 1000;
 
 	snprintf(cmd, sizeof(cmd), "ip -6 route list table all | grep %s",
 		 ifname);
@@ -699,13 +700,14 @@ static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
 		return -1;
 	}
 
-	len = fread(result, 1, result_len, fp);
+	len = fread(result, 1, result_len - 1, fp);
 	fclose(fp);
 
 	if (len == 0) {
 		free(result);
 		return -1;
 	}
+	result[len] = '\0';
 
 	pos = strstr(result, "table ");
 	if (pos == NULL) {
@@ -4668,6 +4670,12 @@ static void ath_sta_inject_frame(struct sigma_dut *dut, const char *intf,
 	char buf[100];
 	int tid_to_dscp [] = { 0x00, 0x20, 0x40, 0x60, 0x80, 0xa0, 0xc0, 0xe0 };
 
+	if (tid < 0 ||
+	    tid >= (int) (sizeof(tid_to_dscp) / sizeof(tid_to_dscp[0]))) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported TID: %d", tid);
+		return;
+	}
+
 	/*
 	 * Two ways to ensure that addba request with a
 	 * non zero TID could be sent out. EV 117296
@@ -7266,6 +7274,7 @@ static int cmd_sta_set_systime(struct sigma_dut *dut, struct sigma_conn *conn,
 	struct tm tm;
 	time_t t;
 	const char *val;
+	int v;
 
 	wpa_command(get_station_ifname(), "PMKSA_FLUSH");
 
@@ -7283,8 +7292,15 @@ static int cmd_sta_set_systime(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (val)
 		tm.tm_mday = atoi(val);
 	val = get_param(cmd, "month");
-	if (val)
-		tm.tm_mon = atoi(val) - 1;
+	if (val) {
+		v = atoi(val);
+		if (v < 1 || v > 12) {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Invalid month");
+			return 0;
+		}
+		tm.tm_mon = v - 1;
+	}
 	val = get_param(cmd, "year");
 	if (val) {
 		int year = atoi(val);
