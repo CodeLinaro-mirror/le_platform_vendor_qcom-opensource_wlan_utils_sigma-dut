@@ -816,8 +816,13 @@ static int cmd_sta_start_autonomous_go(struct sigma_dut *dut,
 		freq = 2407 + chan * 5;
 	else if (chan == 14)
 		freq = 2484;
-	else
+	else if (chan >= 36 && chan <= 165)
 		freq = 5000 + chan * 5;
+	else {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Invalid channel: %d", chan);
+		return -1;
+	}
 
 	if (ssid_param)
 		snprintf(buf, sizeof(buf), "P2P_SET ssid_postfix %s",
@@ -1077,8 +1082,13 @@ static int cmd_sta_p2p_start_group_formation(struct sigma_dut *dut,
 			freq = 2407 + chan * 5;
 		else if (chan == 14)
 			freq = 2484;
-		else
+		else if (chan >= 36 && chan <= 165)
 			freq = 5000 + chan * 5;
+		else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid channel: %d", chan);
+			return -1;
+		}
 	}
 
 	if (dut->wps_method == WFA_CS_WPS_NOT_READY) {
@@ -1740,6 +1750,7 @@ int cmd_sta_p2p_reset(struct sigma_dut *dut, struct sigma_conn *conn,
 	wpa_command(get_station_ifname(), "P2P_SET ps 98");
 	wpa_command(get_station_ifname(), "P2P_SET ps 96");
 	wpa_command(get_station_ifname(), "P2P_SET ps 0");
+	wpa_command(intf, "P2P_SET ps 0");
 	wpa_command(intf, "SET persistent_reconnect 1");
 	wpa_command(intf, "SET ampdu 1");
 	run_system(dut, "iptables -F INPUT");
