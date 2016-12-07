@@ -57,16 +57,11 @@ LOCAL_C_INCLUDES += \
 	$(LOCAL_PATH) hardware/libhardware_legacy/include/hardware_legacy
 LOCAL_SHARED_LIBRARIES := libc libcutils
 LOCAL_SHARED_LIBRARIES += libhardware_legacy
-ifdef SIGMA_DUT_NAN
-ifneq ($(wildcard hardware/qcom/wlan/qcwcn/wifi_hal/nan.h),)
-LOCAL_SHARED_LIBRARIES := libwifi-hal-qcom
+ifeq ($(BOARD_WLAN_DEVICE),qcwcn)
+ifneq ($(wildcard hardware/qcom/wlan/qcwcn/wifi_hal/nan_cert.h),)
+LOCAL_SHARED_LIBRARIES += libwifi-hal-qcom
 OBJS += nan.c
 CFLAGS += -DANDROID_NAN
-endif
-ifneq ($(wildcard external/libnl),)
-LOCAL_SHARED_LIBRARIES += libnl
-else
-LOCAL_STATIC_LIBRARIES += libnl_2
 endif
 endif
 ver = $(filter 4.3%,$(PLATFORM_VERSION))

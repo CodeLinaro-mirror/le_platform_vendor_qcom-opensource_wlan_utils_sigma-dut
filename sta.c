@@ -162,36 +162,32 @@ int set_ps(const char *intf, struct sigma_dut *dut, int enabled)
 	if (wifi_chip_type == DRIVER_WCN) {
 		if (enabled) {
 			snprintf(buf, sizeof(buf), "iwpriv wlan0 dump 906");
-			if (system(buf) != 0) {
-				sigma_dut_print(dut, DUT_MSG_ERROR,
-					"Failed to enable power save");
-				return -1;
-			}
+			if (system(buf) != 0)
+				goto set_power_save;
 		} else {
 			snprintf(buf, sizeof(buf), "iwpriv wlan0 dump 905");
-			if (system(buf) != 0) {
-				sigma_dut_print(dut, DUT_MSG_ERROR,
-						"Failed to stop power save timer");
-				return -1;
-			}
+			if (system(buf) != 0)
+				goto set_power_save;
 			snprintf(buf, sizeof(buf), "iwpriv wlan0 dump 912");
-			if (system(buf) != 0) {
-				sigma_dut_print(dut, DUT_MSG_ERROR,
-						"Failed to disable power save");
-				 return -1;
-			}
+			if (system(buf) != 0)
+				goto set_power_save;
 		}
 
 		return 0;
 	}
 
+set_power_save:
 	snprintf(buf, sizeof(buf), "./iw dev %s set power_save %s",
 		 intf, enabled ? "on" : "off");
 	if (system(buf) != 0) {
 		snprintf(buf, sizeof(buf), "iw dev %s set power_save %s",
 			 intf, enabled ? "on" : "off");
-		if (system(buf) != 0)
+		if (system(buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set power save %s",
+					enabled ? "on" : "off");
 			return -1;
+		}
 	}
 
 	return 0;
@@ -689,7 +685,8 @@ static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
 {
 	char cmd[200], *result, *pos;
 	FILE *fp;
-	int len, tableid, result_len = 1000;
+	int tableid;
+	size_t len, result_len = 1000;
 
 	snprintf(cmd, sizeof(cmd), "ip -6 route list table all | grep %s",
 		 ifname);
@@ -703,13 +700,14 @@ static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
 		return -1;
 	}
 
-	len = fread(result, 1, result_len, fp);
+	len = fread(result, 1, result_len - 1, fp);
 	fclose(fp);
 
 	if (len == 0) {
 		free(result);
 		return -1;
 	}
+	result[len] = '\0';
 
 	pos = strstr(result, "table ");
 	if (pos == NULL) {
@@ -1164,7 +1162,8 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		   strcasecmp(val, "wpa2-sha256") == 0) {
 		if (set_network(ifname, id, "proto", "WPA2") < 0)
 			return -2;
-	} else if (strcasecmp(val, "wpa2-wpa-psk") == 0) {
+	} else if (strcasecmp(val, "wpa2-wpa-psk") == 0 ||
+		   strcasecmp(val, "wpa2-wpa-ent") == 0) {
 		if (set_network(ifname, id, "proto", "WPA WPA2") < 0)
 			return -2;
 	} else {
@@ -2521,12 +2520,18 @@ static void ath_sta_set_11nrates(struct sigma_dut *dut, const char *intf,
 				 const char *val)
 {
 	char buf[100];
-	int rate_code;
+	int rate_code, v;
 
 	/* Disable Tx Beam forming when using a fixed rate */
 	ath_disable_txbf(dut, intf);
 
-	rate_code = 0x80 + atoi(val);
+	v = atoi(val);
+	if (v < 0 || v > 32) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Invalid Fixed MCS rate: %d", v);
+		return;
+	}
+	rate_code = 0x80 + v;
 
 	snprintf(buf, sizeof(buf), "iwpriv %s set11NRates 0x%x",
 		 intf, rate_code);
@@ -2677,6 +2682,21 @@ static int wcn_sta_set_sp_stream(struct sigma_dut *dut, const char *intf,
 	}
 
 	return 0;
+}
+
+
+static void wcn_sta_set_stbc(struct sigma_dut *dut, const char *intf,
+			     const char *val)
+{
+	char buf[60];
+
+	snprintf(buf, sizeof(buf), "iwpriv %s tx_stbc %s", intf, val);
+	if (system(buf) != 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv tx_stbc failed");
+
+	snprintf(buf, sizeof(buf), "iwpriv %s rx_stbc %s", intf, val);
+	if (system(buf) != 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv rx_stbc failed");
 }
 
 
@@ -3194,6 +3214,9 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 		case DRIVER_ATHEROS:
 			ath_sta_set_stbc(dut, intf, val);
 			break;
+		case DRIVER_WCN:
+			wcn_sta_set_stbc(dut, intf, val);
+			break;
 		default:
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,STBC_RX not supported");
@@ -3274,6 +3297,27 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 	if (val) {
 		switch (get_driver_type()) {
 		case DRIVER_WCN:
+			if (strcasecmp(val, "enable") == 0) {
+				snprintf(buf, sizeof(buf),
+					 "iwpriv %s cwmenable 1", intf);
+				if (system(buf) != 0) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"iwpriv cwmenable 1 failed");
+					return 0;
+				}
+			} else if (strcasecmp(val, "disable") == 0) {
+				snprintf(buf, sizeof(buf),
+					 "iwpriv %s cwmenable 0", intf);
+				if (system(buf) != 0) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"iwpriv cwmenable 0 failed");
+					return 0;
+				}
+			} else {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Unsupported DYN_BW_SGL");
+			}
+
 			snprintf(buf, sizeof(buf), "iwpriv %s cts_cbw 3", intf);
 			if (system(buf) != 0) {
 				sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -3943,7 +3987,7 @@ static int cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 
 #ifdef ANDROID_NAN
 	if (strcasecmp(program, "NAN") == 0)
-		return nan_cmd_sta_exec_action(dut, conn, cmd);
+		return nan_cmd_sta_get_parameter(dut, conn, cmd);
 #endif /* ANDROID_NAN */
 
 	send_resp(dut, conn, SIGMA_ERROR, "ErrorCode,Unsupported parameter");
@@ -4110,6 +4154,12 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 		wpa_command(intf, "SET tdls_disabled 0");
 		wpa_command(intf, "SET tdls_testing 0");
 		dut->no_tpk_expiration = 0;
+		if (get_driver_type() == DRIVER_WCN) {
+			/* Enable the WCN driver in TDLS Explicit trigger mode
+			 */
+			wpa_command(intf, "SET tdls_external_control 0");
+			wpa_command(intf, "SET tdls_trigger_control 0");
+		}
 	}
 
 	switch (get_driver_type()) {
@@ -4196,6 +4246,11 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 
 	dut->er_oper_performed = 0;
 	dut->er_oper_bssid[0] = '\0';
+
+	if (dut->program == PROGRAM_LOC) {
+		/* Disable Interworking by default */
+		wpa_command(get_station_ifname(), "SET interworking 0");
+	}
 
 	if (dut->program != PROGRAM_VHT)
 		return cmd_sta_p2p_reset(dut, conn, cmd);
@@ -4666,6 +4721,12 @@ static void ath_sta_inject_frame(struct sigma_dut *dut, const char *intf,
 {
 	char buf[100];
 	int tid_to_dscp [] = { 0x00, 0x20, 0x40, 0x60, 0x80, 0xa0, 0xc0, 0xe0 };
+
+	if (tid < 0 ||
+	    tid >= (int) (sizeof(tid_to_dscp) / sizeof(tid_to_dscp[0]))) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported TID: %d", tid);
+		return;
+	}
 
 	/*
 	 * Two ways to ensure that addba request with a
@@ -7265,6 +7326,7 @@ static int cmd_sta_set_systime(struct sigma_dut *dut, struct sigma_conn *conn,
 	struct tm tm;
 	time_t t;
 	const char *val;
+	int v;
 
 	wpa_command(get_station_ifname(), "PMKSA_FLUSH");
 
@@ -7282,8 +7344,15 @@ static int cmd_sta_set_systime(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (val)
 		tm.tm_mday = atoi(val);
 	val = get_param(cmd, "month");
-	if (val)
-		tm.tm_mon = atoi(val) - 1;
+	if (val) {
+		v = atoi(val);
+		if (v < 1 || v > 12) {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Invalid month");
+			return 0;
+		}
+		tm.tm_mon = v - 1;
+	}
 	val = get_param(cmd, "year");
 	if (val) {
 		int year = atoi(val);
