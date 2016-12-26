@@ -1162,7 +1162,8 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		   strcasecmp(val, "wpa2-sha256") == 0) {
 		if (set_network(ifname, id, "proto", "WPA2") < 0)
 			return -2;
-	} else if (strcasecmp(val, "wpa2-wpa-psk") == 0) {
+	} else if (strcasecmp(val, "wpa2-wpa-psk") == 0 ||
+		   strcasecmp(val, "wpa2-wpa-ent") == 0) {
 		if (set_network(ifname, id, "proto", "WPA WPA2") < 0)
 			return -2;
 	} else {
@@ -2684,6 +2685,21 @@ static int wcn_sta_set_sp_stream(struct sigma_dut *dut, const char *intf,
 }
 
 
+static void wcn_sta_set_stbc(struct sigma_dut *dut, const char *intf,
+			     const char *val)
+{
+	char buf[60];
+
+	snprintf(buf, sizeof(buf), "iwpriv %s tx_stbc %s", intf, val);
+	if (system(buf) != 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv tx_stbc failed");
+
+	snprintf(buf, sizeof(buf), "iwpriv %s rx_stbc %s", intf, val);
+	if (system(buf) != 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv rx_stbc failed");
+}
+
+
 static int cmd_sta_preset_testparameters(struct sigma_dut *dut,
 					 struct sigma_conn *conn,
 					 struct sigma_cmd *cmd)
@@ -3198,6 +3214,9 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 		case DRIVER_ATHEROS:
 			ath_sta_set_stbc(dut, intf, val);
 			break;
+		case DRIVER_WCN:
+			wcn_sta_set_stbc(dut, intf, val);
+			break;
 		default:
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,STBC_RX not supported");
@@ -3278,6 +3297,27 @@ static int cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 	if (val) {
 		switch (get_driver_type()) {
 		case DRIVER_WCN:
+			if (strcasecmp(val, "enable") == 0) {
+				snprintf(buf, sizeof(buf),
+					 "iwpriv %s cwmenable 1", intf);
+				if (system(buf) != 0) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"iwpriv cwmenable 1 failed");
+					return 0;
+				}
+			} else if (strcasecmp(val, "disable") == 0) {
+				snprintf(buf, sizeof(buf),
+					 "iwpriv %s cwmenable 0", intf);
+				if (system(buf) != 0) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"iwpriv cwmenable 0 failed");
+					return 0;
+				}
+			} else {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Unsupported DYN_BW_SGL");
+			}
+
 			snprintf(buf, sizeof(buf), "iwpriv %s cts_cbw 3", intf);
 			if (system(buf) != 0) {
 				sigma_dut_print(dut, DUT_MSG_ERROR,
