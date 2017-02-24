@@ -170,7 +170,7 @@ void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 	char buf[60];
 
 	if (strcasecmp(val, "enable") == 0) {
-		dut->ap_dyn_bw_sig = AP_DYN_BW_SGNL_ENABLED;
+		dut->ap_dyn_bw_sig = VALUE_ENABLED;
 		snprintf(buf, sizeof(buf), "iwpriv %s cwmenable 1", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -183,7 +183,7 @@ void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 					"disabling RTS from rate control logic failed");
 		}
 	} else if (strcasecmp(val, "disable") == 0) {
-		dut->ap_dyn_bw_sig = AP_DYN_BW_SGNL_DISABLED;
+		dut->ap_dyn_bw_sig = VALUE_DISABLED;
 		snprintf(buf, sizeof(buf), "iwpriv %s cwmenable 0", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -201,7 +201,7 @@ static void ath_config_rts_force(struct sigma_dut *dut, const char *ifname,
 	char buf[60];
 
 	if (strcasecmp(val, "enable") == 0) {
-		dut->ap_sig_rts = 1;
+		dut->ap_sig_rts = VALUE_ENABLED;
 		snprintf(buf, sizeof(buf), "iwconfig %s rts 64", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -214,7 +214,7 @@ static void ath_config_rts_force(struct sigma_dut *dut, const char *ifname,
 					"wifitool beeliner_fw_test 100 1 failed");
 		}
 	} else if (strcasecmp(val, "disable") == 0) {
-		dut->ap_sig_rts = 2;
+		dut->ap_sig_rts = VALUE_DISABLED;
 		snprintf(buf, sizeof(buf), "iwconfig %s rts 2347", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -447,15 +447,21 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	val = get_param(cmd, "RADIO");
 	if (val) {
+		enum driver_type drv = get_driver_type();
+
 		if (strcasecmp(val, "on") == 0) {
-			enum driver_type drv = get_driver_type();
 			if (drv == DRIVER_ATHEROS)
 				ath_ap_start_hostapd(dut);
 			else if (cmd_ap_config_commit(dut, conn, cmd) <= 0)
 				return 0;
 		} else if (strcasecmp(val, "off") == 0) {
-			if (kill_process(dut, "(hostapd)", 1, SIGTERM) == 0 ||
-			    system("killall hostapd") == 0) {
+			if (drv == DRIVER_OPENWRT) {
+				run_system(dut, "wifi down");
+				sigma_dut_print(dut, DUT_MSG_INFO,
+						"wifi down on radio,off");
+			} else if (kill_process(dut, "(hostapd)", 1,
+						SIGTERM) == 0 ||
+				   system("killall hostapd") == 0) {
 				sigma_dut_print(dut, DUT_MSG_INFO,
 						"Killed hostapd on radio,off");
 			}
@@ -477,17 +483,17 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "ADDBA_REJECT");
 	if (val) {
 		if (strcasecmp(val, "Enable") == 0)
-			dut->ap_addba_reject = 1;
+			dut->ap_addba_reject = VALUE_ENABLED;
 		else if (strcasecmp(val, "Disable") == 0)
-			dut->ap_addba_reject = 2;
+			dut->ap_addba_reject = VALUE_DISABLED;
 	}
 
 	val = get_param(cmd, "AMPDU");
 	if (val) {
 		if (strcasecmp(val, "Enable") == 0)
-			dut->ap_ampdu = 1;
+			dut->ap_ampdu = VALUE_ENABLED;
 		else if (strcasecmp(val, "Disable") == 0)
-			dut->ap_ampdu = 2;
+			dut->ap_ampdu = VALUE_DISABLED;
 	}
 
 	val = get_param(cmd, "AMPDU_EXP");
@@ -497,17 +503,17 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "AMSDU");
 	if (val) {
 		if (strcasecmp(val, "Enable") == 0)
-			dut->ap_amsdu = 1;
+			dut->ap_amsdu = VALUE_ENABLED;
 		else if (strcasecmp(val, "Disable") == 0)
-			dut->ap_amsdu = 2;
+			dut->ap_amsdu = VALUE_DISABLED;
 	}
 
 	val = get_param(cmd, "NoAck");
 	if (val) {
 		if (strcasecmp(val, "on") == 0)
-			dut->ap_noack = AP_NOACK_ENABLED;
+			dut->ap_noack = VALUE_ENABLED;
 		else if (strcasecmp(val, "off") == 0)
-			dut->ap_noack = AP_NOACK_DISABLED;
+			dut->ap_noack = VALUE_DISABLED;
 	}
 
 	/* TODO: GREENFIELD */
@@ -740,9 +746,9 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "LDPC");
 	if (val) {
 		if (strcasecmp(val, "enable") == 0)
-			dut->ap_ldpc = 1;
+			dut->ap_ldpc = VALUE_ENABLED;
 		else if (strcasecmp(val, "disable") == 0)
-			dut->ap_ldpc = 2;
+			dut->ap_ldpc = VALUE_DISABLED;
 		else {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Unsupported LDPC");
@@ -757,9 +763,9 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 		 * RTS if the threshold is met.
 		 */
 		if (strcasecmp(val, "enable") == 0) {
-			dut->ap_sig_rts = 1;
+			dut->ap_sig_rts = VALUE_ENABLED;
 		} else if (strcasecmp(val, "disable") == 0) {
-			dut->ap_sig_rts = 2;
+			dut->ap_sig_rts = VALUE_DISABLED;
 		} else {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Unsupported BW_SGNL");
@@ -817,8 +823,18 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_txBF = strcasecmp(val, "enable") == 0;
 
 	val = get_param(cmd, "MU_TxBF");
-	if (val)
-		dut->ap_mu_txBF = strcasecmp(val, "enable") == 0;
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_txBF = 1;
+			dut->ap_mu_txBF = 1;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_txBF = 0;
+			dut->ap_mu_txBF = 0;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported MU_TxBF");
+		}
+	}
 
 	/* UNSUPPORTED: tx_lgi_rate */
 
@@ -2274,13 +2290,15 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 		owrt_ap_set_vap(dut, vap_id, "interworking", "1");
 
 		if (dut->ap_lci == 1 && strlen(dut->ap2_ssid) == 0) {
-			sprintf(anqpval, "'265:0010%s%s060101'",
+			snprintf(anqpval, sizeof(anqpval),
+				"'265:0010%s%s060101'",
 				dut->ap_val_lci, dut->ap_infoz);
 			owrt_ap_set_list_vap(dut, vap_id, "anqp_elem", anqpval);
 		}
 
 		if (dut->ap_lcr == 1) {
-			sprintf(anqpval, "'266:0000b2555302ae%s'",
+			snprintf(anqpval, sizeof(anqpval),
+				"'266:0000b2555302ae%s'",
 				dut->ap_val_lcr);
 			owrt_ap_set_list_vap(dut, vap_id, "anqp_elem", anqpval);
 		}
@@ -2539,9 +2557,10 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 	FILE *fp;
 	char *pid, *temp;
 	char *saveptr;
+	int ret = -1;
 
 	if (dir == NULL)
-		return -1;
+		return ret;
 
 	while ((dp = readdir(dir)) != NULL) {
 		if (dp->d_type != DT_DIR)
@@ -2572,6 +2591,7 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 			snprintf(buf, sizeof(buf), "kill -%d %d", sig,
 				 atoi(pid));
 			run_system(dut, buf);
+			ret = 0;
 			if (is_proc_instance_one)
 				break;
 		}
@@ -2579,7 +2599,7 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 
 	closedir(dir);
 
-	return 0;
+	return ret;
 #else /* __linux__ */
 	return -1;
 #endif /* __linux__ */
@@ -2686,7 +2706,13 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 	struct stat s;
 	int num_tries = 0, ret;
 
-	kill_process(dut, "(netd)", 1, SIGKILL);
+	if (kill_process(dut, "(netd)", 1, SIGKILL) == 0 ||
+	    system("killall netd") == 0) {
+		/* Avoid Error: Error connecting (Connection refused)
+		 * Wait some time to allow netd to reinitialize.
+		 */
+		usleep(1500000);
+	}
 
 	while (num_tries < 10) {
 		ret = run_ndc(dut, "ndc softap stopap");
@@ -3619,9 +3645,9 @@ static void cmd_ath_ap_radio_config(struct sigma_dut *dut)
 		run_system(dut, "cfg -a SHORTGI_2=0");
 	}
 
-	if (dut->ap_ldpc == 1)
+	if (dut->ap_ldpc == VALUE_ENABLED)
 		run_system(dut, "cfg -a LDPC=1");
-	else if (dut->ap_ldpc == 2)
+	else if (dut->ap_ldpc == VALUE_DISABLED)
 		run_system(dut, "cfg -a LDPC=0");
 }
 
@@ -3754,13 +3780,13 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		sigma_dut_print(dut, DUT_MSG_INFO, "Disabled rtscts");
 	}
 
-	if (dut->ap_ldpc == 1) {
-		snprintf(buf, sizeof(buf), "iwpriv %s ldpc 1", ifname);
+	if (dut->ap_ldpc == VALUE_ENABLED) {
+		snprintf(buf, sizeof(buf), "iwpriv %s ldpc 3", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"iwpriv ldpc 1 failed");
 		}
-	} else if (dut->ap_ldpc == 2) {
+	} else if (dut->ap_ldpc == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s ldpc 0", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -3768,13 +3794,13 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		}
 	}
 
-	if (dut->ap_ampdu == 1) {
+	if (dut->ap_ampdu == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s ampdu 1", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"iwpriv ampdu 1 failed");
 		}
-	} else if (dut->ap_ampdu == 2) {
+	} else if (dut->ap_ampdu == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s ampdu 0", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -3800,7 +3826,7 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		}
 	}
 
-	if (dut->ap_noack == AP_NOACK_ENABLED) {
+	if (dut->ap_noack == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s noackpolicy 0 0 1", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv noackpolicy 0 0  1 failed");
@@ -3817,7 +3843,7 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv noackpolicy 3 0 1 failed");
 		}
-	} else if (dut->ap_noack == AP_NOACK_DISABLED) {
+	} else if (dut->ap_noack == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s noackpolicy 0 0 0", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv noackpolicy 0 0 0 failed");
@@ -3845,24 +3871,24 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		}
 	}
 
-	if (dut->ap_amsdu == 1) {
+	if (dut->ap_amsdu == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s amsdu 2", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv amsdu 2 failed");
 		}
-	} else if (dut->ap_amsdu == 2) {
+	} else if (dut->ap_amsdu == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s amsdu 1", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv amsdu 1 failed");
 		}
 	}
 
-	if (dut->ap_rx_amsdu == 1) {
+	if (dut->ap_rx_amsdu == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv wifi1 rx_amsdu 1");
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv rx_amsdu 1 failed");
 		}
-	} else if (dut->ap_rx_amsdu == 2) {
+	} else if (dut->ap_rx_amsdu == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv wifi1 rx_amsdu 0");
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "iwpriv rx_amsdu 0 failed");
@@ -3870,7 +3896,9 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 	}
 
 	/* Command sequence to generate single VHT AMSDU and MPDU */
-	if (dut->ap_addba_reject && dut->ap_ampdu == 2 && dut->ap_amsdu == 1) {
+	if (dut->ap_addba_reject != VALUE_NOT_SET &&
+	    dut->ap_ampdu == VALUE_DISABLED &&
+	    dut->ap_amsdu == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s setaddbaoper 1", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -3967,13 +3995,13 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		}
 	}
 
-	if (dut->ap_dyn_bw_sig == AP_DYN_BW_SGNL_ENABLED) {
+	if (dut->ap_dyn_bw_sig == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s cwmenable 1", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"iwpriv cwmenable 1 failed");
 		}
-	} else if (dut->ap_dyn_bw_sig == AP_DYN_BW_SGNL_DISABLED) {
+	} else if (dut->ap_dyn_bw_sig == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwpriv %s cwmenable 0", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -3981,13 +4009,13 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		}
 	}
 
-	if (dut->ap_sig_rts == 1) {
+	if (dut->ap_sig_rts == VALUE_ENABLED) {
 		snprintf(buf, sizeof(buf), "iwconfig %s rts 64", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"iwconfig rts 64 failed");
 		}
-	} else if (dut->ap_sig_rts == 2) {
+	} else if (dut->ap_sig_rts == VALUE_DISABLED) {
 		snprintf(buf, sizeof(buf), "iwconfig %s rts 2347", ifname);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -4845,7 +4873,10 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	    (dut->ap_mode == AP_11ng || dut->ap_mode == AP_11na)) {
 		fprintf(f, "ieee80211n=1\n");
 		fprintf(f, "ht_capab=");
-		if (dut->ap_mode == AP_11ng && dut->ap_chwidth == AP_40) {
+		if (dut->ap_mode == AP_11ng &&
+		    (dut->ap_chwidth == AP_40 ||
+		     (dut->ap_chwidth == AP_AUTO &&
+		      dut->default_11ng_ap_chwidth == AP_40))) {
 			if (dut->ap_channel >= 1 && dut->ap_channel <= 7)
 				fprintf(f, "[HT40+]");
 			else if (dut->ap_channel >= 8 && dut->ap_channel <= 11)
@@ -4856,7 +4887,7 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (dut->ap_mode == AP_11na &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
-		      dut->default_ap_chwidth == AP_40))) {
+		      dut->default_11na_ap_chwidth == AP_40))) {
 			if (is_ht40plus_chan(dut->ap_channel))
 				fprintf(f, "[HT40+]");
 			else if (is_ht40minus_chan(dut->ap_channel))
@@ -5173,13 +5204,15 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 			vht_oper_centr_freq_idx);
 		fprintf(f, "vht_oper_chwidth=%d\n", dut->ap_vht_chwidth);
 
-		if (dut->ap_sgi80 || dut->ap_txBF || dut->ap_ldpc ||
+		if (dut->ap_sgi80 || dut->ap_txBF ||
+		    dut->ap_ldpc != VALUE_NOT_SET ||
 		    dut->ap_tx_stbc || dut->ap_mu_txBF) {
 			fprintf(f, "vht_capab=%s%s%s%s%s\n",
 				dut->ap_sgi80 ? "[SHORT-GI-80]" : "",
 				dut->ap_txBF ?
 				"[SU-BEAMFORMER][SU-BEAMFORMEE][BF-ANTENNA-2][SOUNDING-DIMENSION-2]" : "",
-				(dut->ap_ldpc == 1) ? "[RXLDPC]" : "",
+				(dut->ap_ldpc == VALUE_ENABLED) ?
+				"[RXLDPC]" : "",
 				dut->ap_tx_stbc ? "[TX-STBC-2BY1]" : "",
 				dut->ap_mu_txBF ? "[MU-BEAMFORMER]" : "");
 		}
@@ -5576,8 +5609,8 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->ap_fake_pkhash = 0;
 	memset(dut->ap_qos, 0, sizeof(dut->ap_qos));
 	memset(dut->ap_sta_qos, 0, sizeof(dut->ap_sta_qos));
-	dut->ap_addba_reject = 0;
-	dut->ap_noack = AP_NOACK_NOT_SET;
+	dut->ap_addba_reject = VALUE_NOT_SET;
+	dut->ap_noack = VALUE_NOT_SET;
 	dut->ap_is_dual = 0;
 	dut->ap_mode = AP_inval;
 	dut->ap_mode_1 = AP_inval;
@@ -5586,10 +5619,10 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->ap_allow_vht_tkip = 0;
 	dut->ap_disable_protection = 0;
 	memset(dut->ap_countrycode, 0, sizeof(dut->ap_countrycode));
-	dut->ap_dyn_bw_sig = AP_DYN_BW_SGNL_NOT_SET;
-	dut->ap_ldpc = 0;
-	dut->ap_sig_rts = 0;
-	dut->ap_rx_amsdu = 0;
+	dut->ap_dyn_bw_sig = VALUE_NOT_SET;
+	dut->ap_ldpc = VALUE_NOT_SET;
+	dut->ap_sig_rts = VALUE_NOT_SET;
+	dut->ap_rx_amsdu = VALUE_NOT_SET;
 	dut->ap_txBF = 0;
 	dut->ap_mu_txBF = 0;
 	dut->ap_chwidth = AP_AUTO;
@@ -5686,23 +5719,23 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 		/* Set up the defaults */
 		dut->ap_mode = AP_11ac;
 		dut->ap_channel = 36;
-		dut->ap_ampdu = 0;
+		dut->ap_ampdu = VALUE_NOT_SET;
 		dut->ap_ndpa_frame = 1;
 		if (dut->device_type == AP_testbed) {
-			dut->ap_amsdu = 2;
-			dut->ap_ldpc = 2;
-			dut->ap_rx_amsdu = 2;
+			dut->ap_amsdu = VALUE_DISABLED;
+			dut->ap_ldpc = VALUE_DISABLED;
+			dut->ap_rx_amsdu = VALUE_DISABLED;
 			dut->ap_sgi80 = 0;
 		} else {
-			dut->ap_amsdu = 1;
+			dut->ap_amsdu = VALUE_ENABLED;
 			/*
 			 * As LDPC is optional, don't enable this by default
 			 * for LINUX-WCN driver. The ap_set_wireless command
 			 * can be used to enable LDPC, when needed.
 			 */
 			if (drv != DRIVER_LINUX_WCN)
-				dut->ap_ldpc = 1;
-			dut->ap_rx_amsdu = 1;
+				dut->ap_ldpc = VALUE_ENABLED;
+			dut->ap_rx_amsdu = VALUE_ENABLED;
 			dut->ap_sgi80 = 1;
 		}
 		dut->ap_fixed_rate = 0;
@@ -5711,7 +5744,7 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_vhtmcs_map = 0;
 		dut->ap_chwidth = AP_80;
 		dut->ap_tx_stbc = 1;
-		dut->ap_dyn_bw_sig = AP_DYN_BW_SGNL_ENABLED;
+		dut->ap_dyn_bw_sig = VALUE_ENABLED;
 		if (get_openwrt_driver_type() == OPENWRT_DRIVER_ATHEROS)
 			dut->ap_dfs_mode = AP_DFS_MODE_ENABLED;
 		if (get_driver_type() == DRIVER_ATHEROS)
