@@ -447,15 +447,21 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	val = get_param(cmd, "RADIO");
 	if (val) {
+		enum driver_type drv = get_driver_type();
+
 		if (strcasecmp(val, "on") == 0) {
-			enum driver_type drv = get_driver_type();
 			if (drv == DRIVER_ATHEROS)
 				ath_ap_start_hostapd(dut);
 			else if (cmd_ap_config_commit(dut, conn, cmd) <= 0)
 				return 0;
 		} else if (strcasecmp(val, "off") == 0) {
-			if (kill_process(dut, "(hostapd)", 1, SIGTERM) == 0 ||
-			    system("killall hostapd") == 0) {
+			if (drv == DRIVER_OPENWRT) {
+				run_system(dut, "wifi down");
+				sigma_dut_print(dut, DUT_MSG_INFO,
+						"wifi down on radio,off");
+			} else if (kill_process(dut, "(hostapd)", 1,
+						SIGTERM) == 0 ||
+				   system("killall hostapd") == 0) {
 				sigma_dut_print(dut, DUT_MSG_INFO,
 						"Killed hostapd on radio,off");
 			}
@@ -817,8 +823,18 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_txBF = strcasecmp(val, "enable") == 0;
 
 	val = get_param(cmd, "MU_TxBF");
-	if (val)
-		dut->ap_mu_txBF = strcasecmp(val, "enable") == 0;
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_txBF = 1;
+			dut->ap_mu_txBF = 1;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_txBF = 0;
+			dut->ap_mu_txBF = 0;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported MU_TxBF");
+		}
+	}
 
 	/* UNSUPPORTED: tx_lgi_rate */
 
@@ -2541,9 +2557,10 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 	FILE *fp;
 	char *pid, *temp;
 	char *saveptr;
+	int ret = -1;
 
 	if (dir == NULL)
-		return -1;
+		return ret;
 
 	while ((dp = readdir(dir)) != NULL) {
 		if (dp->d_type != DT_DIR)
@@ -2574,6 +2591,7 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 			snprintf(buf, sizeof(buf), "kill -%d %d", sig,
 				 atoi(pid));
 			run_system(dut, buf);
+			ret = 0;
 			if (is_proc_instance_one)
 				break;
 		}
@@ -2581,7 +2599,7 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 
 	closedir(dir);
 
-	return 0;
+	return ret;
 #else /* __linux__ */
 	return -1;
 #endif /* __linux__ */
@@ -2688,7 +2706,13 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 	struct stat s;
 	int num_tries = 0, ret;
 
-	kill_process(dut, "(netd)", 1, SIGKILL);
+	if (kill_process(dut, "(netd)", 1, SIGKILL) == 0 ||
+	    system("killall netd") == 0) {
+		/* Avoid Error: Error connecting (Connection refused)
+		 * Wait some time to allow netd to reinitialize.
+		 */
+		usleep(1500000);
+	}
 
 	while (num_tries < 10) {
 		ret = run_ndc(dut, "ndc softap stopap");
@@ -4849,7 +4873,10 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	    (dut->ap_mode == AP_11ng || dut->ap_mode == AP_11na)) {
 		fprintf(f, "ieee80211n=1\n");
 		fprintf(f, "ht_capab=");
-		if (dut->ap_mode == AP_11ng && dut->ap_chwidth == AP_40) {
+		if (dut->ap_mode == AP_11ng &&
+		    (dut->ap_chwidth == AP_40 ||
+		     (dut->ap_chwidth == AP_AUTO &&
+		      dut->default_11ng_ap_chwidth == AP_40))) {
 			if (dut->ap_channel >= 1 && dut->ap_channel <= 7)
 				fprintf(f, "[HT40+]");
 			else if (dut->ap_channel >= 8 && dut->ap_channel <= 11)
@@ -4860,7 +4887,7 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (dut->ap_mode == AP_11na &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
-		      dut->default_ap_chwidth == AP_40))) {
+		      dut->default_11na_ap_chwidth == AP_40))) {
 			if (is_ht40plus_chan(dut->ap_channel))
 				fprintf(f, "[HT40+]");
 			else if (is_ht40minus_chan(dut->ap_channel))
