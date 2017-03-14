@@ -9,6 +9,10 @@
 #ifndef SIGMA_DUT_H
 #define SIGMA_DUT_H
 
+#ifdef __GNUC__
+#define _GNU_SOURCE	1
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -493,6 +497,11 @@ struct sigma_dut {
 		AP_WME_OFF,
 		AP_WME_ON,
 	} ap_wme;
+
+	enum ap_wmmps {
+		AP_WMMPS_OFF,
+		AP_WMMPS_ON,
+	} ap_wmmps;
 
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
