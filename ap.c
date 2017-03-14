@@ -429,7 +429,16 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 					"Unsupported WME value: %s", val);
 	}
 
-	/* TODO: WMMPS */
+	val = get_param(cmd, "WMMPS");
+	if (val) {
+		if (strcasecmp(val, "on") == 0)
+			dut->ap_wmmps = AP_WMMPS_ON;
+		else if (strcasecmp(val, "off") == 0)
+			dut->ap_wmmps = AP_WMMPS_OFF;
+		else
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported WMMPS value: %s", val);
+	}
 
 	val = get_param(cmd, "RTS");
 	if (val)
@@ -447,15 +456,21 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	val = get_param(cmd, "RADIO");
 	if (val) {
+		enum driver_type drv = get_driver_type();
+
 		if (strcasecmp(val, "on") == 0) {
-			enum driver_type drv = get_driver_type();
 			if (drv == DRIVER_ATHEROS)
 				ath_ap_start_hostapd(dut);
 			else if (cmd_ap_config_commit(dut, conn, cmd) <= 0)
 				return 0;
 		} else if (strcasecmp(val, "off") == 0) {
-			if (kill_process(dut, "(hostapd)", 1, SIGTERM) == 0 ||
-			    system("killall hostapd") == 0) {
+			if (drv == DRIVER_OPENWRT) {
+				run_system(dut, "wifi down");
+				sigma_dut_print(dut, DUT_MSG_INFO,
+						"wifi down on radio,off");
+			} else if (kill_process(dut, "(hostapd)", 1,
+						SIGTERM) == 0 ||
+				   system("killall hostapd") == 0) {
 				sigma_dut_print(dut, DUT_MSG_INFO,
 						"Killed hostapd on radio,off");
 			}
@@ -817,8 +832,18 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_txBF = strcasecmp(val, "enable") == 0;
 
 	val = get_param(cmd, "MU_TxBF");
-	if (val)
-		dut->ap_mu_txBF = strcasecmp(val, "enable") == 0;
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_txBF = 1;
+			dut->ap_mu_txBF = 1;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_txBF = 0;
+			dut->ap_mu_txBF = 0;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported MU_TxBF");
+		}
+	}
 
 	/* UNSUPPORTED: tx_lgi_rate */
 
@@ -2541,9 +2566,10 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 	FILE *fp;
 	char *pid, *temp;
 	char *saveptr;
+	int ret = -1;
 
 	if (dir == NULL)
-		return -1;
+		return ret;
 
 	while ((dp = readdir(dir)) != NULL) {
 		if (dp->d_type != DT_DIR)
@@ -2574,6 +2600,7 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 			snprintf(buf, sizeof(buf), "kill -%d %d", sig,
 				 atoi(pid));
 			run_system(dut, buf);
+			ret = 0;
 			if (is_proc_instance_one)
 				break;
 		}
@@ -2581,7 +2608,7 @@ static int kill_process(struct sigma_dut *dut, char *proc_name,
 
 	closedir(dir);
 
-	return 0;
+	return ret;
 #else /* __linux__ */
 	return -1;
 #endif /* __linux__ */
@@ -2688,7 +2715,13 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 	struct stat s;
 	int num_tries = 0, ret;
 
-	kill_process(dut, "(netd)", 1, SIGKILL);
+	if (kill_process(dut, "(netd)", 1, SIGKILL) == 0 ||
+	    system("killall netd") == 0) {
+		/* Avoid Error: Error connecting (Connection refused)
+		 * Wait some time to allow netd to reinitialize.
+		 */
+		usleep(1500000);
+	}
 
 	while (num_tries < 10) {
 		ret = run_ndc(dut, "ndc softap stopap");
@@ -4760,6 +4793,12 @@ static int is_ht40minus_chan(int chan)
 }
 
 
+static int get_5g_channel_freq(int chan)
+{
+	return 5000 + chan * 5;
+}
+
+
 static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 				struct sigma_cmd *cmd)
 {
@@ -4847,30 +4886,38 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
 	    (dut->ap_mode == AP_11ng || dut->ap_mode == AP_11na)) {
+		int ht40plus = 0, ht40minus = 0, tx_stbc = 0;
+
 		fprintf(f, "ieee80211n=1\n");
-		fprintf(f, "ht_capab=");
-		if (dut->ap_mode == AP_11ng && dut->ap_chwidth == AP_40) {
+		if (dut->ap_mode == AP_11ng &&
+		    (dut->ap_chwidth == AP_40 ||
+		     (dut->ap_chwidth == AP_AUTO &&
+		      dut->default_11ng_ap_chwidth == AP_40))) {
 			if (dut->ap_channel >= 1 && dut->ap_channel <= 7)
-				fprintf(f, "[HT40+]");
+				ht40plus = 1;
 			else if (dut->ap_channel >= 8 && dut->ap_channel <= 11)
-				fprintf(f, "[HT40-]");
+				ht40minus = 1;
+			fprintf(f, "obss_interval=300\n");
 		}
 
 		/* configure ht_capab based on channel width */
 		if (dut->ap_mode == AP_11na &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
-		      dut->default_ap_chwidth == AP_40))) {
+		      dut->default_11na_ap_chwidth == AP_40))) {
 			if (is_ht40plus_chan(dut->ap_channel))
-				fprintf(f, "[HT40+]");
+				ht40plus = 1;
 			else if (is_ht40minus_chan(dut->ap_channel))
-				fprintf(f, "[HT40-]");
+				ht40minus = 1;
 		}
 
 		if (dut->ap_tx_stbc)
-			fprintf(f, "[TX-STBC]");
+			tx_stbc = 1;
 
-		fprintf(f, "\n");
+		fprintf(f, "ht_capab=%s%s%s\n",
+			ht40plus ? "[HT40+]" : "",
+			ht40minus ? "[HT40-]" : "",
+			tx_stbc ? "[TX-STBC]" : "");
 	}
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
@@ -4982,6 +5029,9 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		break;
 	}
 
+	if (dut->ap_rsn_preauth)
+		fprintf(f, "rsn_preauth=1\n");
+
 	switch (dut->ap_pmf) {
 	case AP_PMF_DISABLED:
 		break;
@@ -5021,6 +5071,9 @@ static int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (dut->ap_wme)
 		fprintf(f, "wmm_enabled=1\n");
+
+	if (dut->ap_wmmps == AP_WMMPS_ON)
+		fprintf(f, "uapsd_advertisement_enabled=1\n");
 
 	if (dut->ap_hs2) {
 		if (dut->ap_bss_load) {
@@ -5608,10 +5661,13 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->ap_regulatory_mode = AP_80211D_MODE_DISABLED;
 	dut->ap_dfs_mode = AP_DFS_MODE_DISABLED;
 
-	if (dut->program == PROGRAM_HT || dut->program == PROGRAM_VHT)
+	if (dut->program == PROGRAM_HT || dut->program == PROGRAM_VHT) {
 		dut->ap_wme = AP_WME_ON;
-	else
+		dut->ap_wmmps = AP_WMMPS_ON;
+	} else {
 		dut->ap_wme = AP_WME_OFF;
+		dut->ap_wmmps = AP_WMMPS_OFF;
+	}
 
 	if (dut->program == PROGRAM_HS2 || dut->program == PROGRAM_HS2_R2) {
 		int i;
@@ -7623,6 +7679,67 @@ static int wcn_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int mac80211_vht_chnum_band(struct sigma_dut *dut, const char *ifname,
+				   const char *val)
+{
+	char *token, *result;
+	int channel = 36, chwidth = 80, center_freq_idx, center_freq,
+		channel_freq;
+	char buf[100];
+	char *saveptr;
+
+	/* Extract the channel info */
+	token = strdup(val);
+	if (!token)
+		return -1;
+	result = strtok_r(token, ";", &saveptr);
+	if (result)
+		channel = atoi(result);
+
+	/* Extract the channel width info */
+	result = strtok_r(NULL, ";", &saveptr);
+	if (result)
+		chwidth = atoi(result);
+
+	center_freq_idx = get_oper_centr_freq_seq_idx(chwidth, channel);
+	if (center_freq_idx < 0) {
+		free(token);
+		return -1;
+	}
+
+	center_freq = get_5g_channel_freq(center_freq_idx);
+	channel_freq = get_5g_channel_freq(channel);
+
+	/* Issue the channel switch command */
+	snprintf(buf, sizeof(buf),
+		 " -i %s chan_switch 10 %d sec_channel_offset=1 center_freq1=%d bandwidth=%d blocktx vht",
+		 ifname, channel_freq, center_freq, chwidth);
+	if (run_hostapd_cli(dut,buf) != 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"hostapd_cli chan_switch failed");
+	}
+
+	free(token);
+	return 0;
+}
+
+
+static int mac80211_ap_set_rfeature(struct sigma_dut *dut,
+				    struct sigma_conn *conn,
+				    struct sigma_cmd *cmd)
+{
+	const char *val;
+	char *ifname;
+
+	ifname = get_main_ifname();
+	val = get_param(cmd, "chnum_band");
+	if (val && mac80211_vht_chnum_band(dut, ifname, val) < 0)
+		return -1;
+
+	return 1;
+}
+
+
 static int cmd_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd)
 {
@@ -7644,6 +7761,8 @@ static int cmd_ap_set_rfeature(struct sigma_dut *dut, struct sigma_conn *conn,
 	case DRIVER_LINUX_WCN:
 	case DRIVER_WCN:
 		return wcn_ap_set_rfeature(dut, conn, cmd);
+	case DRIVER_MAC80211:
+		return mac80211_ap_set_rfeature(dut, conn, cmd);
 	default:
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Unsupported ap_set_rfeature with the current driver");
