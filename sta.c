@@ -10,6 +10,8 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #ifdef __linux__
+#include <regex.h>
+#include <dirent.h>
 #include <sys/time.h>
 #include <netpacket/packet.h>
 #include <linux/if_ether.h>
@@ -195,6 +197,44 @@ set_power_save:
 	return -1;
 #endif /* __linux__ */
 }
+
+
+#ifdef __linux__
+static int wil6210_get_debugfs_dir(struct sigma_dut *dut, char *path,
+				   size_t len)
+{
+	DIR *dir, *wil_dir;
+	struct dirent *entry;
+	int ret = -1;
+	const char *root_path = "/sys/kernel/debug/ieee80211";
+
+	dir = opendir(root_path);
+	if (!dir)
+		return -2;
+
+	while ((entry = readdir(dir))) {
+		if (strcmp(entry->d_name, ".") == 0 ||
+		    strcmp(entry->d_name, "..") == 0)
+			continue;
+
+		if (snprintf(path, len, "%s/%s/wil6210",
+			     root_path, entry->d_name) >= (int) len) {
+			ret = -3;
+			break;
+		}
+
+		wil_dir = opendir(path);
+		if (wil_dir) {
+			closedir(wil_dir);
+			ret = 0;
+			break;
+		}
+	}
+
+	closedir(dir);
+	return ret;
+}
+#endif /* __linux__ */
 
 
 static void static_ip_file(int proto, const char *addr, const char *mask,
@@ -3613,10 +3653,51 @@ static int sta_pcp_start(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int wil6210_set_abft_len(struct sigma_dut *dut, int abft_len)
+{
+	char buf[128], fname[128];
+	FILE *f;
+
+	if (wil6210_get_debugfs_dir(dut, buf, sizeof(buf))) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"failed to get wil6210 debugfs dir");
+		return -1;
+	}
+
+	snprintf(fname, sizeof(fname), "%s/abft_len", buf);
+	f = fopen(fname, "w");
+	if (!f) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"failed to open: %s", fname);
+		return -1;
+	}
+
+	fprintf(f, "%d\n", abft_len);
+	fclose(f);
+
+	return 0;
+}
+
+
+static int sta_set_60g_abft_len(struct sigma_dut *dut, struct sigma_conn *conn,
+				int abft_len)
+{
+	switch (get_driver_type()) {
+	case DRIVER_WIL6210:
+		return wil6210_set_abft_len(dut, abft_len);
+	default:
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"set abft_len not supported");
+		return -1;
+	}
+}
+
+
 static int sta_set_60g_pcp(struct sigma_dut *dut, struct sigma_conn *conn,
 			    struct sigma_cmd *cmd)
 {
 	const char *val;
+	unsigned int abft_len = 1; /* default is one slot */
 
 	if (dut->dev_role != DEVROLE_PCP) {
 		send_resp(dut, conn, SIGMA_INVALID,
@@ -3724,7 +3805,15 @@ static int sta_set_60g_pcp(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "ABFTLRang");
 	if (val) {
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
-				"Ignoring ABFTLRang parameter since FW default is greater than 1");
+				"ABFTLRang parameter %s", val);
+		if (strcmp(val, "Gt1") == 0)
+			abft_len = 2; /* 2 slots in this case */
+	}
+
+	if (sta_set_60g_abft_len(dut, conn, abft_len)) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode, Can't set ABFT length");
+		return -1;
 	}
 
 	if (sta_pcp_start(dut, conn, cmd) < 0) {
@@ -3887,6 +3976,81 @@ static void hs2_clear_credentials(const char *intf)
 }
 
 
+#ifdef __linux__
+static int wil6210_get_aid(struct sigma_dut *dut, const char *bssid,
+			   unsigned int *aid)
+{
+	char buf[128], fname[128];
+	FILE *f;
+	regex_t re;
+	regmatch_t m[2];
+	int rc, ret = -1;
+
+	if (wil6210_get_debugfs_dir(dut, buf, sizeof(buf))) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"failed to get wil6210 debugfs dir");
+		return -1;
+	}
+
+	snprintf(fname, sizeof(fname), "%s/stations", buf);
+	f = fopen(fname, "r");
+	if (!f) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"failed to open: %s", fname);
+		return -1;
+	}
+
+	if (regcomp(&re, "AID[ \t]+([0-9]+)", REG_EXTENDED)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"regcomp failed");
+		goto out;
+	}
+
+	/*
+	 * find the entry for the mac address
+	 * line is of the form: [n] 11:22:33:44:55:66 state AID aid
+	 */
+	while (fgets(buf, sizeof(buf), f)) {
+		if (strstr(buf, bssid)) {
+			/* extract the AID */
+			rc = regexec(&re, buf, 2, m, 0);
+			if (!rc && (m[1].rm_so >= 0)) {
+				buf[m[1].rm_eo] = 0;
+				*aid = atoi(&buf[m[1].rm_so]);
+				ret = 0;
+				break;
+			}
+		}
+	}
+
+	regfree(&re);
+	if (ret)
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"could not extract AID");
+
+out:
+	fclose(f);
+
+	return ret;
+}
+#endif /* __linux__ */
+
+
+static int sta_get_aid_60g(struct sigma_dut *dut, const char *bssid,
+			   unsigned int *aid)
+{
+	switch (get_driver_type()) {
+#ifdef __linux__
+	case DRIVER_WIL6210:
+		return wil6210_get_aid(dut, bssid, aid);
+#endif /* __linux__ */
+	default:
+		sigma_dut_print(dut, DUT_MSG_ERROR, "get AID not supported");
+		return -1;
+	}
+}
+
+
 static int sta_get_parameter_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 				 struct sigma_cmd *cmd)
 {
@@ -3896,6 +4060,26 @@ static int sta_get_parameter_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (parameter == NULL)
 		return -1;
+
+	if (strcasecmp(parameter, "AID") == 0) {
+		unsigned int aid = 0;
+		char bssid[20];
+
+		if (get_wpa_status(get_station_ifname(), "bssid",
+				   bssid, sizeof(bssid)) < 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"could not get bssid");
+			return -2;
+		}
+
+		if (sta_get_aid_60g(dut, bssid, &aid))
+			return -2;
+
+		snprintf(buf, sizeof(buf), "aid,%d", aid);
+		sigma_dut_print(dut, DUT_MSG_INFO, "%s", buf);
+		send_resp(dut, conn, SIGMA_COMPLETE, buf);
+		return 0;
+	}
 
 	if (strcasecmp(parameter, "DiscoveredDevList") == 0) {
 		char *bss_line;
@@ -4818,12 +5002,93 @@ static int ath_sta_send_addba(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+#ifdef __linux__
+
+static int wil6210_send_addba(struct sigma_dut *dut, const char *dest_mac,
+			      int agg_size)
+{
+	char dir[128], buf[128];
+	FILE *f;
+	regex_t re;
+	regmatch_t m[2];
+	int rc, ret = -1, vring_id, found;
+
+	if (wil6210_get_debugfs_dir(dut, dir, sizeof(dir))) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"failed to get wil6210 debugfs dir");
+		return -1;
+	}
+
+	snprintf(buf, sizeof(buf), "%s/vrings", dir);
+	f = fopen(buf, "r");
+	if (!f) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "failed to open: %s", buf);
+		return -1;
+	}
+
+	if (regcomp(&re, "VRING tx_[ \t]*([0-9]+)", REG_EXTENDED)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "regcomp failed");
+		goto out;
+	}
+
+	/* find TX VRING for the mac address */
+	found = 0;
+	while (fgets(buf, sizeof(buf), f)) {
+		if (strcasestr(buf, dest_mac)) {
+			found = 1;
+			break;
+		}
+	}
+
+	if (!found) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"no TX VRING for %s", dest_mac);
+		goto out;
+	}
+
+	/* extract VRING ID, "VRING tx_<id> = {" */
+	if (!fgets(buf, sizeof(buf), f)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"no VRING start line for %s", dest_mac);
+		goto out;
+	}
+
+	rc = regexec(&re, buf, 2, m, 0);
+	regfree(&re);
+	if (rc || m[1].rm_so < 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"no VRING TX ID for %s", dest_mac);
+		goto out;
+	}
+	buf[m[1].rm_eo] = 0;
+	vring_id = atoi(&buf[m[1].rm_so]);
+
+	/* send the addba command */
+	fclose(f);
+	snprintf(buf, sizeof(buf), "%s/back", dir);
+	f = fopen(buf, "w");
+	if (!f) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"failed to open: %s", buf);
+		return -1;
+	}
+
+	fprintf(f, "add %d %d\n", vring_id, agg_size);
+
+	ret = 0;
+
+out:
+	fclose(f);
+
+	return ret;
+}
+
+
 static int send_addba_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 			  struct sigma_cmd *cmd)
 {
 	const char *val;
 	int tid = 0;
-	char buf[100];
 
 	val = get_param(cmd, "TID");
 	if (val) {
@@ -4842,18 +5107,13 @@ static int send_addba_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 		return SIGMA_DUT_ERROR_CALLER_SEND_STATUS;
 	}
 
-	snprintf(buf, sizeof(buf), "wil6210_addba_req.py %s %d",
-		 val, dut->back_rcv_buf);
-	sigma_dut_print(dut, DUT_MSG_INFO, "Run: %s", buf);
-
-	if (system(buf) != 0) {
-		sigma_dut_print(dut, DUT_MSG_ERROR,
-			"Failed to send addba");
+	if (wil6210_send_addba(dut, val, dut->back_rcv_buf))
 		return -1;
-	}
 
 	return 1;
 }
+
+#endif /* __linux__ */
 
 
 static int cmd_sta_send_addba(struct sigma_dut *dut, struct sigma_conn *conn,
@@ -4862,8 +5122,10 @@ static int cmd_sta_send_addba(struct sigma_dut *dut, struct sigma_conn *conn,
 	switch (get_driver_type()) {
 	case DRIVER_ATHEROS:
 		return ath_sta_send_addba(dut, conn, cmd);
+#ifdef __linux__
 	case DRIVER_WIL6210:
 		return send_addba_60g(dut, conn, cmd);
+#endif /* __linux__ */
 	default:
 		/*
 		 * There is no driver specific implementation for other drivers.
