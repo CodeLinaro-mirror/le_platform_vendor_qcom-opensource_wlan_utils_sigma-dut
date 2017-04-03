@@ -21,7 +21,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <net/if.h>
 #ifdef __QNXNTO__
@@ -223,6 +223,12 @@ enum value_not_set_enabled_disabled {
 	VALUE_NOT_SET,
 	VALUE_ENABLED,
 	VALUE_DISABLED
+};
+
+enum sec_ch_offset {
+	SEC_CH_NO,
+	SEC_CH_40ABOVE,
+	SEC_CH_40BELOW
 };
 
 struct sigma_dut {
@@ -503,6 +509,8 @@ struct sigma_dut {
 		AP_WMMPS_ON,
 	} ap_wmmps;
 
+	enum sec_ch_offset ap_chwidth_offset;
+
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
 	char sniffer_filename[200];
@@ -652,6 +660,8 @@ void ath_set_cts_width(struct sigma_dut *dut, const char *ifname,
 		       const char *val);
 int ath_set_width(struct sigma_dut *dut, struct sigma_conn *conn,
 		  const char *intf, const char *val);
+int wil6210_send_frame_60g(struct sigma_dut *dut, struct sigma_conn *conn,
+			   struct sigma_cmd *cmd);
 
 /* p2p.c */
 int p2p_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
