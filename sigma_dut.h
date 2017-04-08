@@ -9,6 +9,10 @@
 #ifndef SIGMA_DUT_H
 #define SIGMA_DUT_H
 
+#ifdef __GNUC__
+#define _GNU_SOURCE	1
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -340,7 +344,8 @@ struct sigma_dut {
 		AP_160,
 		AP_AUTO
 	} ap_chwidth;
-	enum ap_chwidth default_ap_chwidth;
+	enum ap_chwidth default_11na_ap_chwidth;
+	enum ap_chwidth default_11ng_ap_chwidth;
 	int ap_tx_stbc;
 	enum value_not_set_enabled_disabled ap_dyn_bw_sig;
 	int ap_sgi80;
@@ -492,6 +497,11 @@ struct sigma_dut {
 		AP_WME_OFF,
 		AP_WME_ON,
 	} ap_wme;
+
+	enum ap_wmmps {
+		AP_WMMPS_OFF,
+		AP_WMMPS_ON,
+	} ap_wmmps;
 
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
