@@ -1,7 +1,7 @@
 /*
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
- * Copyright (c) 2011-2014, Qualcomm Atheros, Inc.
+ * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include "wpa_ctrl.h"
 #include "wpa_helpers.h"
+#include "miracast.h"
 
 
 int run_system(struct sigma_dut *dut, const char *cmd)
@@ -22,6 +23,31 @@ int run_system(struct sigma_dut *dut, const char *cmd)
 		sigma_dut_print(dut, DUT_MSG_DEBUG, "Failed to execute "
 				"command '%s'", cmd);
 	}
+	return res;
+}
+
+
+int run_system_wrapper(struct sigma_dut *dut, const char *cmd, ...)
+{
+	va_list ap;
+	char *buf;
+	int bytes_required;
+	int res;
+
+	va_start(ap, cmd);
+	bytes_required = vsnprintf(NULL, 0, cmd, ap);
+	bytes_required += 1;
+	va_end(ap);
+	buf = malloc(bytes_required);
+	if (!buf) {
+		printf("ERROR!! No memory\n");
+		return -1;
+	}
+	va_start(ap, cmd);
+	vsnprintf(buf, bytes_required, cmd, ap);
+	va_end(ap);
+	res = run_system(dut, buf);
+	free(buf);
 	return res;
 }
 
@@ -56,7 +82,7 @@ static int get_60g_freq(int chan)
 #define END_IP_RANGE "192.168.43.100"
 #define FLUSH_IP_ADDR "0.0.0.0"
 
-static void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
+void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 {
 #ifdef __linux__
 	char buf[200];
@@ -93,7 +119,7 @@ static void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 }
 
 
-static void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
+void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 {
 #ifdef __linux__
 	char path[128];
@@ -462,8 +488,8 @@ static int p2p_peer_known(const char *ifname, const char *peer, int full)
 }
 
 
-static int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
-			     const char *peer, int full)
+int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
+		      const char *peer, int full)
 {
 	unsigned int count;
 
@@ -795,6 +821,9 @@ static int cmd_sta_start_autonomous_go(struct sigma_dut *dut,
 	const char *intf = get_param(cmd, "Interface");
 	const char *oper_chn = get_param(cmd, "OPER_CHN");
 	const char *ssid_param = get_param(cmd, "SSID");
+#ifdef MIRACAST
+	const char *rtsp = get_param(cmd, "RTSP");
+#endif /* MIRACAST */
 	int freq, chan, res;
 	char buf[256], grpid[100], resp[200];
 	struct wpa_ctrl *ctrl;
@@ -916,6 +945,14 @@ static int cmd_sta_start_autonomous_go(struct sigma_dut *dut,
 	p2p_group_add(dut, ifname, strcmp(gtype, "GO") == 0, grpid, ssid);
 
 	snprintf(resp, sizeof(resp), "GroupID,%s", grpid);
+
+#ifdef MIRACAST
+	if (rtsp && atoi(rtsp) == 1) {
+		/* Start RTSP Thread for incoming connections */
+		miracast_start_autonomous_go(dut, conn, cmd, ifname);
+	}
+#endif /* MIRACAST */
+
 	send_resp(dut, conn, SIGMA_COMPLETE, resp);
 	return 0;
 }
@@ -1057,10 +1094,14 @@ static int cmd_sta_p2p_start_group_formation(struct sigma_dut *dut,
 	int freq = 0, chan = 0, init;
 	char buf[256];
 	struct wpa_ctrl *ctrl;
+	int intent;
 
 	if (devid == NULL || intent_val == NULL)
 		return -1;
 
+	intent = atoi(intent_val);
+	if (intent > 15)
+		intent = 1;
 	if (init_go_neg)
 		init = atoi(init_go_neg);
 	else
@@ -1134,7 +1175,7 @@ static int cmd_sta_p2p_start_group_formation(struct sigma_dut *dut,
 		   " keypad" )),
 		 dut->persistent ? " persistent" : "",
 		 init ? "" : " auth",
-		 atoi(intent_val));
+		 intent);
 	if (freq > 0) {
 		snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
 			 " freq=%d", freq);
@@ -1711,6 +1752,12 @@ int cmd_sta_p2p_reset(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *intf = get_param(cmd, "interface");
 	struct wfa_cs_p2p_group *grp, *prev;
 	char buf[256];
+
+#ifdef MIRACAST
+	if (dut->program == PROGRAM_WFD ||
+	    dut->program == PROGRAM_DISPLAYR2)
+		miracast_sta_reset_default(dut, conn, cmd);
+#endif /* MIRACAST */
 
 	dut->go = 0;
 	dut->p2p_client = 0;
