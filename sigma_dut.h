@@ -9,6 +9,10 @@
 #ifndef SIGMA_DUT_H
 #define SIGMA_DUT_H
 
+#ifdef __GNUC__
+#define _GNU_SOURCE	1
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -17,7 +21,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <sys/time.h>
-#include <sys/types.h> 
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <net/if.h>
 #ifdef __QNXNTO__
@@ -215,6 +219,18 @@ struct sigma_stream {
 #define AP_AC_VI 2
 #define AP_AC_VO 3
 
+enum value_not_set_enabled_disabled {
+	VALUE_NOT_SET,
+	VALUE_ENABLED,
+	VALUE_DISABLED
+};
+
+enum sec_ch_offset {
+	SEC_CH_NO,
+	SEC_CH_40ABOVE,
+	SEC_CH_40BELOW
+};
+
 struct sigma_dut {
 	int s; /* server TCP socket */
 	int debug_level;
@@ -314,23 +330,19 @@ struct sigma_dut {
 		int txop;
 		int acm;
 	} ap_qos[NUM_AP_AC], ap_sta_qos[NUM_AP_AC];
-	enum ap_noack_values {
-		AP_NOACK_NOT_SET,
-		AP_NOACK_ENABLED,
-		AP_NOACK_DISABLED
-	} ap_noack;
-	int ap_ampdu;
-	int ap_amsdu;
-	int ap_rx_amsdu;
+	enum value_not_set_enabled_disabled ap_noack;
+	enum value_not_set_enabled_disabled ap_ampdu;
+	enum value_not_set_enabled_disabled ap_amsdu;
+	enum value_not_set_enabled_disabled ap_rx_amsdu;
 	int ap_ampdu_exp;
-	int ap_addba_reject;
+	enum value_not_set_enabled_disabled ap_addba_reject;
 	int ap_fixed_rate;
 	int ap_mcs;
 	int ap_rx_streams;
 	int ap_tx_streams;
 	unsigned int ap_vhtmcs_map;
-	int ap_ldpc;
-	int ap_sig_rts;
+	enum value_not_set_enabled_disabled ap_ldpc;
+	enum value_not_set_enabled_disabled ap_sig_rts;
 	enum ap_chwidth {
 		AP_20,
 		AP_40,
@@ -338,13 +350,10 @@ struct sigma_dut {
 		AP_160,
 		AP_AUTO
 	} ap_chwidth;
-	enum ap_chwidth default_ap_chwidth;
+	enum ap_chwidth default_11na_ap_chwidth;
+	enum ap_chwidth default_11ng_ap_chwidth;
 	int ap_tx_stbc;
-	enum ap_dyn_bw_sig_values {
-		AP_DYN_BW_SGNL_NOT_SET,
-		AP_DYN_BW_SGNL_ENABLED,
-		AP_DYN_BW_SGNL_DISABLED
-	} ap_dyn_bw_sig;
+	enum value_not_set_enabled_disabled ap_dyn_bw_sig;
 	int ap_sgi80;
 	int ap_p2p_mgmt;
 	enum ap_key_mgmt {
@@ -495,6 +504,13 @@ struct sigma_dut {
 		AP_WME_ON,
 	} ap_wme;
 
+	enum ap_wmmps {
+		AP_WMMPS_OFF,
+		AP_WMMPS_ON,
+	} ap_wmmps;
+
+	enum sec_ch_offset ap_chwidth_offset;
+
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
 	char sniffer_filename[200];
@@ -644,6 +660,8 @@ void ath_set_cts_width(struct sigma_dut *dut, const char *ifname,
 		       const char *val);
 int ath_set_width(struct sigma_dut *dut, struct sigma_conn *conn,
 		  const char *intf, const char *val);
+int wil6210_send_frame_60g(struct sigma_dut *dut, struct sigma_conn *conn,
+			   struct sigma_cmd *cmd);
 
 /* p2p.c */
 int p2p_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
