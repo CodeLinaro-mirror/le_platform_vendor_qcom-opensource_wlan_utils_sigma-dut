@@ -483,7 +483,7 @@ int get_ip_config(struct sigma_dut *dut, const char *ifname, char *buf,
 		struct sockaddr_in saddr;
 
 		memset(&ifr, 0, sizeof(ifr));
-		strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+		strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 		if (ioctl(s, SIOCGIFADDR, &ifr) < 0) {
 			sigma_dut_print(dut, DUT_MSG_INFO, "Failed to get "
 					"%s IP address: %s",
@@ -491,13 +491,13 @@ int get_ip_config(struct sigma_dut *dut, const char *ifname, char *buf,
 		} else {
 			memcpy(&saddr, &ifr.ifr_addr,
 			       sizeof(struct sockaddr_in));
-			strncpy(ip, inet_ntoa(saddr.sin_addr), sizeof(ip));
+			strlcpy(ip, inet_ntoa(saddr.sin_addr), sizeof(ip));
 		}
 
 		if (ioctl(s, SIOCGIFNETMASK, &ifr) == 0) {
 			memcpy(&saddr, &ifr.ifr_addr,
 			       sizeof(struct sockaddr_in));
-			strncpy(mask, inet_ntoa(saddr.sin_addr), sizeof(mask));
+			strlcpy(mask, inet_ntoa(saddr.sin_addr), sizeof(mask));
 		}
 		close(s);
 	}
@@ -517,21 +517,14 @@ int get_ip_config(struct sigma_dut *dut, const char *ifname, char *buf,
 	}
 
 	snprintf(tmp, sizeof(tmp), "dhcp.%s.dns1", ifname);
-	if (property_get(tmp, prop, NULL) != 0) {
-		strncpy(dns, prop, sizeof(dns));
-		dns[sizeof(dns) - 1] = '\0';
-	} else {
-		if (property_get("net.dns1", prop, NULL) != 0) {
-			strncpy(dns, prop, sizeof(dns));
-			dns[sizeof(dns) - 1] = '\0';
-		}
-	}
+	if (property_get(tmp, prop, NULL) != 0)
+		strlcpy(dns, prop, sizeof(dns));
+	else if (property_get("net.dns1", prop, NULL) != 0)
+		strlcpy(dns, prop, sizeof(dns));
 
 	snprintf(tmp, sizeof(tmp), "dhcp.%s.dns2", ifname);
-	if (property_get(tmp, prop, NULL) != 0) {
-		strncpy(sec_dns, prop, sizeof(sec_dns));
-		sec_dns[sizeof(sec_dns) - 1] = '\0';
-	}
+	if (property_get(tmp, prop, NULL) != 0)
+		strlcpy(sec_dns, prop, sizeof(sec_dns));
 #else /* ANDROID */
 #ifdef __linux__
 	if (get_driver_type() == DRIVER_OPENWRT)
@@ -575,13 +568,10 @@ int get_ip_config(struct sigma_dut *dut, const char *ifname, char *buf,
 				}
 				pos2++;
 			}
-			if (!dns[0]) {
-				strncpy(dns, pos, sizeof(dns));
-				dns[sizeof(dns) - 1] = '\0';
-			} else if (!sec_dns[0]) {
-				strncpy(sec_dns, pos, sizeof(sec_dns));
-				sec_dns[sizeof(sec_dns) - 1] = '\0';
-			}
+			if (!dns[0])
+				strlcpy(dns, pos, sizeof(dns));
+			else if (!sec_dns[0])
+				strlcpy(sec_dns, pos, sizeof(sec_dns));
 		}
 		fclose(f);
 	}
@@ -1193,7 +1183,7 @@ static int cmd_sta_get_bssid(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (get_wpa_status(get_station_ifname(), "bssid", bssid, sizeof(bssid))
 	    < 0)
-		strncpy(bssid, "00:00:00:00:00:00", sizeof(bssid));
+		strlcpy(bssid, "00:00:00:00:00:00", sizeof(bssid));
 
 	snprintf(resp, sizeof(resp), "bssid,%s", bssid);
 	send_resp(dut, conn, SIGMA_COMPLETE, resp);
@@ -2631,7 +2621,7 @@ static void ath_sta_set_noack(struct sigma_dut *dut, const char *intf,
 	char buf[100];
 	char *saveptr;
 
-	strncpy(token, val, sizeof(token));
+	strlcpy(token, val, sizeof(token));
 	token[sizeof(token) - 1] = '\0';
 	result = strtok_r(token, ":", &saveptr);
 	while (result) {
@@ -3085,12 +3075,9 @@ static int cmd_sta_preset_testparameters(struct sigma_dut *dut,
 	const char *val;
 
 	val = get_param(cmd, "Program");
-	if (val && strcasecmp(val, "HS2-R2") == 0) {
-		if (intf == NULL)
-			return -1;
+	if (val && strcasecmp(val, "HS2-R2") == 0)
 		return cmd_sta_preset_testparameters_hs2_r2(dut, conn, intf,
 							    cmd);
-	}
 
 	if (val && strcasecmp(val, "LOC") == 0)
 		return loc_cmd_sta_preset_testparameters(dut, conn, cmd);
@@ -4080,7 +4067,7 @@ static int sta_set_60g_pcp(struct sigma_dut *dut, struct sigma_conn *conn,
 			return -1;
 		}
 
-		strncpy(dut->ap_ssid, val, sizeof(dut->ap_ssid));
+		strlcpy(dut->ap_ssid, val, sizeof(dut->ap_ssid));
 	}
 
 	val = get_param(cmd, "CHANNEL");
@@ -4963,8 +4950,7 @@ static int cmd_sta_set_wireless_vht(struct sigma_dut *dut,
 		int value, config_val = 0;
 		char *saveptr;
 
-		strncpy(token, val, sizeof(token));
-		token[sizeof(token) - 1] = '\0';
+		strlcpy(token, val, sizeof(token));
 		result = strtok_r(token, delim, &saveptr);
 
 		/* Extract the NSS information */
@@ -5050,8 +5036,7 @@ static int cmd_sta_set_wireless_vht(struct sigma_dut *dut,
 		unsigned int vht_mcsmap = 0;
 		char *saveptr;
 
-		strncpy(token, val, sizeof(token));
-		token[sizeof(token) - 1] = '\0';
+		strlcpy(token, val, sizeof(token));
 		result = strtok_r(token, ";", &saveptr);
 		if (!result) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -6167,7 +6152,7 @@ static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
 		struct sockaddr_in saddr;
 
 		memset(&ifr, 0, sizeof(ifr));
-		strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+		strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 		if (ioctl(s, SIOCGIFADDR, &ifr) < 0) {
 			sigma_dut_print(dut, DUT_MSG_INFO, "Failed to get "
 					"%s IP address: %s",
@@ -6177,7 +6162,7 @@ static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
 		} else {
 			memcpy(&saddr, &ifr.ifr_addr,
 			       sizeof(struct sockaddr_in));
-			strncpy(ip, inet_ntoa(saddr.sin_addr), sizeof(ip));
+			strlcpy(ip, inet_ntoa(saddr.sin_addr), sizeof(ip));
 		}
 		close(s);
 
@@ -8415,8 +8400,8 @@ static int cmd_sta_er_config(struct sigma_dut *dut, struct sigma_conn *conn,
 		return 0;
 	}
 
-	if (strlen(ssid) >= 2 * sizeof(ssid_hex) ||
-	    strlen(passphrase) >= 2 * sizeof(passphrase_hex)) {
+	if (2 * strlen(ssid) >= sizeof(ssid_hex) ||
+	    2 * strlen(passphrase) >= sizeof(passphrase_hex)) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Too long SSID/passphrase");
 		return 0;
