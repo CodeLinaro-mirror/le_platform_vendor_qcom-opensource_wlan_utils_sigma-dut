@@ -1,6 +1,6 @@
 /*
  * Sigma Control API DUT (station/AP)
- * Copyright (c) 2014-2015, Qualcomm Atheros, Inc.
+ * Copyright (c) 2014-2017, Qualcomm Atheros, Inc.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -97,6 +97,8 @@ enum sigma_program sigma_program_to_enum(const char *prog)
 		return PROGRAM_HS2_R2;
 	if (strcasecmp(prog, "WFD") == 0)
 		return PROGRAM_WFD;
+	if (strcasecmp(prog, "DisplayR2") == 0)
+		return PROGRAM_DISPLAYR2;
 	if (strcasecmp(prog, "PMF") == 0)
 		return PROGRAM_PMF;
 	if (strcasecmp(prog, "WPS") == 0)
@@ -113,6 +115,8 @@ enum sigma_program sigma_program_to_enum(const char *prog)
 		return PROGRAM_LOC;
 	if (strcasecmp(prog, "MBO") == 0)
 		return PROGRAM_MBO;
+	if (strcasecmp(prog, "IoTLP") == 0)
+		return PROGRAM_IOTLP;
 
 	return PROGRAM_UNKNOWN;
 }
@@ -176,3 +180,78 @@ fail:
 			arg);
 	return -1;
 }
+
+
+unsigned int channel_to_freq(unsigned int channel)
+{
+	if (channel >= 1 && channel <= 13)
+		return 2407 + 5 * channel;
+	if (channel == 14)
+		return 2484;
+	if (channel >= 36 && channel <= 165)
+		return 5000 + 5 * channel;
+
+	return 0;
+}
+
+
+unsigned int freq_to_channel(unsigned int freq)
+{
+	if (freq >= 2412 && freq <= 2472)
+		return (freq - 2407) / 5;
+	if (freq == 2484)
+		return 14;
+	if (freq >= 5180 && freq <= 5825)
+		return (freq - 5000) / 5;
+	return 0;
+}
+
+
+#ifndef ANDROID
+
+size_t strlcpy(char *dest, const char *src, size_t siz)
+{
+	const char *s = src;
+	size_t left = siz;
+
+	if (left) {
+		/* Copy string up to the maximum size of the dest buffer */
+		while (--left != 0) {
+			if ((*dest++ = *s++) == '\0')
+				break;
+		}
+	}
+
+	if (left == 0) {
+		/* Not enough room for the string; force NUL-termination */
+		if (siz != 0)
+			*dest = '\0';
+		while (*s++)
+			; /* determine total src string length */
+	}
+
+	return s - src - 1;
+}
+
+
+size_t strlcat(char *dst, const char *str, size_t size)
+{
+	char *pos;
+	size_t dstlen, srclen, copy;
+
+	srclen = strlen(str);
+	for (pos = dst; pos - dst < size && *dst; pos++)
+		;
+	dstlen = pos - dst;
+	if (*dst)
+		return dstlen + srclen;
+	if (dstlen + srclen + 1 > size)
+		copy = size - dstlen - 1;
+	else
+		copy = srclen;
+	memcpy(pos, str, copy);
+	pos[copy] = '\0';
+	return dstlen + srclen;
+}
+
+#endif /* ANDROID */
