@@ -4242,6 +4242,7 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 	char buf[100];
 	int res;
 	int chan = 0;
+	int status = 0;
 
 	if (bssid == NULL) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Missing bssid "
@@ -4271,11 +4272,52 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (wifi_chip_type == DRIVER_WCN) {
 #ifdef ANDROID
+		if (chan) {
+			unsigned int freq;
+
+			freq = channel_to_freq(chan);
+			if (!freq) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Invalid channel number provided: %d",
+						chan);
+				send_resp(dut, conn, SIGMA_INVALID,
+					  "ErrorCode,Invalid channel number");
+				goto close_mon_conn;
+			}
+			res = snprintf(buf, sizeof(buf),
+				       "SCAN TYPE=ONLY freq=%d", freq);
+		} else {
+			res = snprintf(buf, sizeof(buf), "SCAN TYPE=ONLY");
+		}
+		if (res < 0 || res >= (int) sizeof(buf)) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,snprintf failed");
+			goto close_mon_conn;
+		}
+		if (wpa_command(intf, buf) < 0) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Failed to start scan");
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,scan failed");
+			goto close_mon_conn;
+		}
+
+		res = get_wpa_cli_event(dut, ctrl, "CTRL-EVENT-SCAN-RESULTS",
+					buf, sizeof(buf));
+		if (res < 0) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Scan did not complete");
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,scan did not complete");
+			goto close_mon_conn;
+		}
+
 		if (set_network(intf, dut->infra_network_id, "bssid", "any")
 		    < 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to set "
 					"bssid to any during FASTREASSOC");
-			return -2;
+			status = -2;
+			goto close_mon_conn;
 		}
 		res = snprintf(buf, sizeof(buf), "DRIVER FASTREASSOC %s %d",
 			       bssid, chan);
@@ -4285,9 +4327,7 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (res < 0 || res >= (int) sizeof(buf)) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,Failed to run DRIVER FASTREASSOC");
-			wpa_ctrl_detach(ctrl);
-			wpa_ctrl_close(ctrl);
-			return 0;
+			goto close_mon_conn;
 		}
 #else /* ANDROID */
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
@@ -4296,9 +4336,8 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 		snprintf(buf, sizeof(buf), "iwpriv %s reassoc", intf);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR, "%s failed", buf);
-			wpa_ctrl_detach(ctrl);
-			wpa_ctrl_close(ctrl);
-			return 0;
+			status = -2;
+			goto close_mon_conn;
 		}
 #endif /* ANDROID */
 		sigma_dut_print(dut, DUT_MSG_INFO,
@@ -4306,23 +4345,22 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 	} else if (wpa_command(intf, "REASSOCIATE")) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Failed to "
 			  "request reassociation");
-		wpa_ctrl_detach(ctrl);
-		wpa_ctrl_close(ctrl);
-		return 0;
+		goto close_mon_conn;
 	}
 
 	res = get_wpa_cli_event(dut, ctrl, "CTRL-EVENT-CONNECTED",
 				buf, sizeof(buf));
+	if (res < 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO, "Connection did not complete");
+		status = -1;
+		goto close_mon_conn;
+	}
+	status = 1;
 
+close_mon_conn:
 	wpa_ctrl_detach(ctrl);
 	wpa_ctrl_close(ctrl);
-
-	if (res < 0) {
-		sigma_dut_print(dut, DUT_MSG_INFO, "Scan did not complete");
-		return -1;
-	}
-
-	return 1;
+	return status;
 }
 
 
