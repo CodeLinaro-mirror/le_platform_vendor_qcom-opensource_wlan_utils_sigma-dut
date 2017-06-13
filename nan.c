@@ -40,6 +40,8 @@ struct sigma_dut *global_dut = NULL;
 static char global_nan_mac_addr[ETH_ALEN];
 static char global_peer_mac_addr[ETH_ALEN];
 static char global_event_resp_buf[1024];
+static u8 global_publish_service_name[NAN_MAX_SERVICE_NAME_LEN];
+static u32 global_publish_service_name_len = 0;
 
 static int nan_further_availability_tx(struct sigma_dut *dut,
 				       struct sigma_conn *conn,
@@ -466,13 +468,16 @@ static int sigma_nan_subscribe_request(struct sigma_dut *dut,
 	const char *include_bit = get_param(cmd, "IncludeBit");
 	const char *mac = get_param(cmd, "MAC");
 	const char *srf_type = get_param(cmd, "SRFType");
+	const char *awake_dw_interval = get_param(cmd, "awakeDWint");
 	NanSubscribeRequest req;
+	NanConfigRequest config_req;
 	int filter_len_rx = 0, filter_len_tx = 0;
 	u8 input_rx[NAN_MAX_MATCH_FILTER_LEN];
 	u8 input_tx[NAN_MAX_MATCH_FILTER_LEN];
 	wifi_error ret;
 
 	memset(&req, 0, sizeof(NanSubscribeRequest));
+	memset(&config_req, 0, sizeof(NanConfigRequest));
 	req.ttl = 0;
 	req.period = 1;
 	req.subscribe_type = 1;
@@ -568,6 +573,54 @@ static int sigma_nan_subscribe_request(struct sigma_dut *dut,
 		req.service_name_len = strlen(service_name);
 	}
 
+	if (awake_dw_interval) {
+		int input_dw_interval_val = atoi(awake_dw_interval);
+		int awake_dw_int = 0;
+
+		if (input_dw_interval_val > NAN_MAX_ALLOWED_DW_AWAKE_INTERVAL) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"%s: input active dw interval = %d overwritting dw interval to Max allowed dw interval 16",
+					__func__, input_dw_interval_val);
+			input_dw_interval_val =
+				NAN_MAX_ALLOWED_DW_AWAKE_INTERVAL;
+		}
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s: input active DW interval = %d",
+				__func__, input_dw_interval_val);
+		/*
+		 * Indicates the interval for Sync beacons and SDF's in 2.4 GHz
+		 * or 5 GHz band. Valid values of DW Interval are: 1, 2, 3, 4,
+		 * and 5; 0 is reserved. The SDF includes in OTA when enabled.
+		 * The publish/subscribe period values don't override the device
+		 * level configurations.
+		 * input_dw_interval_val is provided by the user are in the
+		 * format 2^n-1 = 1/2/4/8/16. Internal implementation expects n
+		 * to be passed to indicate the awake_dw_interval.
+		 */
+		if (input_dw_interval_val == 1 ||
+		    input_dw_interval_val % 2 == 0) {
+			while (input_dw_interval_val > 0) {
+				input_dw_interval_val >>= 1;
+				awake_dw_int++;
+			}
+		}
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s:converted active DW interval = %d",
+				__func__, awake_dw_int);
+		config_req.config_dw.config_2dot4g_dw_band = 1;
+		config_req.config_dw.dw_2dot4g_interval_val = awake_dw_int;
+		config_req.config_dw.config_5g_dw_band = 1;
+		config_req.config_dw.dw_5g_interval_val = awake_dw_int;
+		ret = nan_config_request(0, global_interface_handle,
+					 &config_req);
+		if (ret != WIFI_SUCCESS) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s:NAN config request failed",
+					__func__);
+			return -2;
+		}
+	}
+
 	ret = nan_subscribe_request(0, global_interface_handle, &req);
 	if (ret != WIFI_SUCCESS) {
 		send_resp(dut, conn, SIGMA_ERROR,
@@ -612,6 +665,9 @@ static int sigma_nan_data_request(struct sigma_dut *dut,
 	const char *avoid_channel = get_param(cmd, "avoidchannel");
 	const char *invalid_nan_schedule = get_param(cmd, "InvalidNANSchedule");
 	const char *map_order = get_param(cmd, "maporder");
+#if NAN_CERT_VERSION >= 3
+	const char *qos_config = get_param(cmd, "QoS");
+#endif
 	wifi_error ret;
 	NanDataPathInitiatorRequest init_req;
 	NanDebugParams cfg_debug;
@@ -686,6 +742,23 @@ static int sigma_nan_data_request(struct sigma_dut *dut,
 					 cfg_debug, size);
 	}
 
+#if NAN_CERT_VERSION >= 3
+	if (qos_config) {
+		u32 qos_config_val = 0;
+
+		memset(&cfg_debug, 0, sizeof(NanDebugParams));
+		cfg_debug.cmd = NAN_TEST_MODE_CMD_CONFIG_QOS;
+		qos_config_val = atoi(qos_config);
+		memcpy(cfg_debug.debug_cmd_data, &qos_config_val, sizeof(u32));
+		size = sizeof(u32) + sizeof(u32);
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s: qos config: cmd type = %d and command data = %d",
+				__func__, cfg_debug.cmd, qos_config_val);
+		nan_debug_command_config(0, global_interface_handle,
+					 cfg_debug, size);
+	}
+#endif
+
 	/*
 	 * Setting this flag, so that interface for ping6 command
 	 * is set appropriately in traffic_send_ping().
@@ -727,6 +800,7 @@ static int sigma_nan_data_request(struct sigma_dut *dut,
 			init_req.channel_request_type);
 
 	if (dut->nan_pmk_len == NAN_PMK_INFO_LEN) {
+		init_req.key_info.key_type = NAN_SECURITY_KEY_INPUT_PMK;
 		memcpy(&init_req.key_info.body.pmk_info.pmk[0],
 		       &dut->nan_pmk[0], NAN_PMK_INFO_LEN);
 		init_req.key_info.body.pmk_info.pmk_len = NAN_PMK_INFO_LEN;
@@ -1037,13 +1111,19 @@ int sigma_nan_publish_request(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *ndp_type = get_param(cmd, "DataPathType");
 	const char *data_path_security = get_param(cmd, "datapathsecurity");
 	const char *range_required = get_param(cmd, "rangerequired");
+	const char *awake_dw_interval = get_param(cmd, "awakeDWint");
+#if NAN_CERT_VERSION >= 3
+	const char *qos_config = get_param(cmd, "QoS");
+#endif
 	NanPublishRequest req;
+	NanConfigRequest config_req;
 	int filter_len_rx = 0, filter_len_tx = 0;
 	u8 input_rx[NAN_MAX_MATCH_FILTER_LEN];
 	u8 input_tx[NAN_MAX_MATCH_FILTER_LEN];
 	wifi_error ret;
 
 	memset(&req, 0, sizeof(NanPublishRequest));
+	memset(&config_req, 0, sizeof(NanConfigRequest));
 	req.ttl = 0;
 	req.period = 1;
 	req.publish_match_indicator = 1;
@@ -1052,10 +1132,25 @@ int sigma_nan_publish_request(struct sigma_dut *dut, struct sigma_conn *conn,
 	req.publish_count = 0;
 	req.service_responder_policy = NAN_SERVICE_ACCEPT_POLICY_ALL;
 
+	if (global_publish_service_name_len &&
+	    service_name &&
+	    strcasecmp((char *) global_publish_service_name,
+		       service_name) == 0 &&
+	    global_publish_id) {
+		req.publish_id = global_publish_id;
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s: updating publish_id = %d in publish request",
+				__func__, req.publish_id);
+	}
+
 	if (service_name) {
 		strlcpy((char *) req.service_name, service_name,
-			strlen(service_name) + 1);
-		req.service_name_len = strlen(service_name);
+			sizeof(req.service_name));
+		req.service_name_len = strlen((char *) req.service_name);
+		strlcpy((char *) global_publish_service_name, service_name,
+			sizeof(global_publish_service_name));
+		global_publish_service_name_len =
+			strlen((char *) global_publish_service_name);
 	}
 
 	if (publish_type) {
@@ -1155,6 +1250,7 @@ int sigma_nan_publish_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		}
 
 		if (dut->nan_pmk_len == NAN_PMK_INFO_LEN) {
+			req.key_info.key_type = NAN_SECURITY_KEY_INPUT_PMK;
 			memcpy(&req.key_info.body.pmk_info.pmk[0],
 				&dut->nan_pmk[0], NAN_PMK_INFO_LEN);
 			req.key_info.body.pmk_info.pmk_len = NAN_PMK_INFO_LEN;
@@ -1166,6 +1262,59 @@ int sigma_nan_publish_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		req.sdea_params.ranging_state = NAN_RANGING_ENABLE;
 		req.sdea_params.range_report = NAN_ENABLE_RANGE_REPORT;
 	}
+
+	if (awake_dw_interval) {
+		int input_dw_interval_val = atoi(awake_dw_interval);
+		int awake_dw_int = 0;
+
+		if (input_dw_interval_val > NAN_MAX_ALLOWED_DW_AWAKE_INTERVAL) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"%s: input active dw interval = %d overwritting dw interval to Max allowed dw interval 16",
+					__func__, input_dw_interval_val);
+			input_dw_interval_val =
+				NAN_MAX_ALLOWED_DW_AWAKE_INTERVAL;
+		}
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s: input active DW interval = %d",
+				__func__, input_dw_interval_val);
+		/*
+		 * Indicates the interval for Sync beacons and SDF's in 2.4 GHz
+		 * or 5 GHz band. Valid values of DW Interval are: 1, 2, 3, 4,
+		 * and 5; 0 is reserved. The SDF includes in OTA when enabled.
+		 * The publish/subscribe period. values don't override the
+		 * device level configurations.
+		 * input_dw_interval_val is provided by the user are in the
+		 * format 2^n-1 = 1/2/4/8/16. Internal implementation expects n
+		 * to be passed to indicate the awake_dw_interval.
+		 */
+		if (input_dw_interval_val == 1 ||
+		    input_dw_interval_val % 2 == 0) {
+			while (input_dw_interval_val > 0) {
+				input_dw_interval_val >>= 1;
+				awake_dw_int++;
+			}
+		}
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s:converted active DW interval = %d",
+				__func__, awake_dw_int);
+		config_req.config_dw.config_2dot4g_dw_band = 1;
+		config_req.config_dw.dw_2dot4g_interval_val = awake_dw_int;
+		config_req.config_dw.config_5g_dw_band = 1;
+		config_req.config_dw.dw_5g_interval_val = awake_dw_int;
+		ret = nan_config_request(0, global_interface_handle,
+					 &config_req);
+		if (ret != WIFI_SUCCESS) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s:NAN config request failed",
+					__func__);
+			return -2;
+		}
+	}
+
+#if NAN_CERT_VERSION >= 3
+	if (qos_config)
+		req.sdea_params.qos_cfg = (NanQosCfgStatus) atoi(qos_config);
+#endif
 
 	ret = nan_publish_request(0, global_interface_handle, &req);
 	if (ret != WIFI_SUCCESS)
@@ -1618,19 +1767,45 @@ static void ndp_event_data_indication(NanDataPathRequestInd *event)
 /* Events callback */
 static void ndp_event_data_confirm(NanDataPathConfirmInd *event)
 {
+	char cmd[200];
+	char ipv6_buf[100];
+
 	sigma_dut_print(global_dut, DUT_MSG_INFO,
 			"Received NDP Confirm Indication");
 
+	memset(cmd, 0, sizeof(cmd));
+	memset(ipv6_buf, 0, sizeof(ipv6_buf));
+
 	global_ndp_instance_id = event->ndp_instance_id;
-	if (system("ifconfig nan0 up") != 0) {
-		sigma_dut_print(global_dut, DUT_MSG_ERROR,
-				"Failed to set nan interface up");
-		return;
-	}
-	if (system("ip -6 route add fe80::/64 dev nan0 table local") != 0) {
-		sigma_dut_print(global_dut, DUT_MSG_ERROR,
-				"Failed to run:ip -6 route replace fe80::/64 dev nan0 table local");
-		return;
+
+	if (event->rsp_code == NAN_DP_REQUEST_ACCEPT) {
+		if (system("ifconfig nan0 up") != 0) {
+			sigma_dut_print(global_dut, DUT_MSG_ERROR,
+					"Failed to set nan interface up");
+			return;
+		}
+		if (system("ip -6 route add fe80::/64 dev nan0 table local") !=
+		    0) {
+			sigma_dut_print(global_dut, DUT_MSG_ERROR,
+					"Failed to run:ip -6 route replace fe80::/64 dev nan0 table local");
+		}
+		convert_mac_addr_to_ipv6_lladdr(event->peer_ndi_mac_addr,
+						ipv6_buf, sizeof(ipv6_buf));
+		snprintf(cmd, sizeof(cmd),
+			 "ip -6 neighbor replace %s lladdr %02x:%02x:%02x:%02x:%02x:%02x nud permanent dev nan0",
+			 ipv6_buf, event->peer_ndi_mac_addr[0],
+			 event->peer_ndi_mac_addr[1],
+			 event->peer_ndi_mac_addr[2],
+			 event->peer_ndi_mac_addr[3],
+			 event->peer_ndi_mac_addr[4],
+			 event->peer_ndi_mac_addr[5]);
+		sigma_dut_print(global_dut, DUT_MSG_INFO,
+				"neighbor replace cmd = %s", cmd);
+		if (system(cmd) != 0) {
+			sigma_dut_print(global_dut, DUT_MSG_ERROR,
+					"Failed to run: ip -6 neighbor replace");
+			return;
+		}
 	}
 }
 
@@ -1697,6 +1872,11 @@ void nan_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->sta_channel = 0;
 	memset(global_event_resp_buf, 0, sizeof(global_event_resp_buf));
 	memset(&global_nan_sync_stats, 0, sizeof(global_nan_sync_stats));
+	memset(global_publish_service_name, 0,
+	       sizeof(global_publish_service_name));
+	global_publish_service_name_len = 0;
+	global_publish_id = 0;
+	global_subscribe_id = 0;
 
 	sigma_nan_data_end(dut, cmd);
 	nan_data_interface_delete(0, global_interface_handle, (char *) "nan0");
@@ -1724,6 +1904,26 @@ int nan_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 	}
 
 	if (nan_op) {
+#if NAN_CERT_VERSION >= 3
+		int size = 0;
+		u32 device_type_val = 0;
+		NanDebugParams cfg_debug;
+
+		memset(&cfg_debug, 0, sizeof(NanDebugParams));
+		cfg_debug.cmd = NAN_TEST_MODE_CMD_DEVICE_TYPE;
+		if (dut->device_type == STA_testbed)
+			device_type_val = NAN_DEVICE_TYPE_TEST_BED;
+		else if (dut->device_type == STA_dut)
+			device_type_val = NAN_DEVICE_TYPE_DUT;
+
+		memcpy(cfg_debug.debug_cmd_data, &device_type_val, sizeof(u32));
+		size = sizeof(u32) + sizeof(u32);
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"%s: Device Type: cmd type = %d and command data = %u",
+				__func__, cfg_debug.cmd, device_type_val);
+		nan_debug_command_config(0, global_interface_handle,
+					 cfg_debug, size);
+#endif
 		/*
 		 * NANOp has been specified.
 		 * We will build a nan_enable or nan_disable command.
@@ -1762,6 +1962,11 @@ int nan_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 			}
 		} else if (strcasecmp(nan_op, "Off") == 0) {
 			sigma_nan_disable(dut, conn, cmd);
+			memset(global_publish_service_name, 0,
+			       sizeof(global_publish_service_name));
+			global_publish_service_name_len = 0;
+			global_publish_id = 0;
+			global_subscribe_id = 0;
 			send_resp(dut, conn, SIGMA_COMPLETE, "NULL");
 		}
 	}
@@ -1844,6 +2049,9 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 	u32 beacon_transmit_time;
 	u32 ndp_channel_freq;
 	u32 ndp_channel_freq2;
+#if NAN_CERT_VERSION >= 3
+	u32 sched_update_channel_freq;
+#endif
 
 	if (program == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Invalid Program Name");
@@ -1861,6 +2069,7 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 	}
 
 	memset(&req, 0, sizeof(NanStatsRequest));
+	memset(resp_buf, 0, sizeof(resp_buf));
 	req.stats_type = (NanStatsType) NAN_STATS_ID_DE_TIMING_SYNC;
 	nan_stats_request(0, global_interface_handle, &req);
 	/*
@@ -1879,12 +2088,23 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 	beacon_transmit_time = global_nan_sync_stats.currAmBTT;
 	ndp_channel_freq = global_nan_sync_stats.ndpChannelFreq;
 	ndp_channel_freq2 = global_nan_sync_stats.ndpChannelFreq2;
+#if NAN_CERT_VERSION >= 3
+	sched_update_channel_freq =
+		global_nan_sync_stats.schedUpdateChannelFreq;
 
+	sigma_dut_print(dut, DUT_MSG_INFO,
+			"%s: NanStatsRequest Master_pref:%02x, Random_factor:%02x, hop_count:%02x beacon_transmit_time:%d ndp_channel_freq:%d ndp_channel_freq2:%d sched_update_channel_freq:%d",
+			__func__, master_pref, random_factor,
+			hop_count, beacon_transmit_time,
+			ndp_channel_freq, ndp_channel_freq2,
+			sched_update_channel_freq);
+#else /* #if NAN_CERT_VERSION >= 3 */
 	sigma_dut_print(dut, DUT_MSG_INFO,
 			"%s: NanStatsRequest Master_pref:%02x, Random_factor:%02x, hop_count:%02x beacon_transmit_time:%d ndp_channel_freq:%d ndp_channel_freq2:%d",
 			__func__, master_pref, random_factor,
 			hop_count, beacon_transmit_time,
 			ndp_channel_freq, ndp_channel_freq2);
+#endif /* #if NAN_CERT_VERSION >= 3 */
 
 	if (strcasecmp(parameter, "MasterPref") == 0) {
 		snprintf(resp_buf, sizeof(resp_buf), "MasterPref,0x%x",
@@ -1922,6 +2142,11 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 				"%s: No Negotiated NDP Channels", __func__);
 		}
+#if NAN_CERT_VERSION >= 3
+	} else if (strcasecmp(parameter, "SchedUpdateChannel") == 0) {
+		snprintf(resp_buf, sizeof(resp_buf), "schedupdatechannel,%d",
+			 freq_to_channel(sched_update_channel_freq));
+#endif
 	} else {
 		send_resp(dut, conn, SIGMA_ERROR, "Invalid Parameter");
 		return 0;
