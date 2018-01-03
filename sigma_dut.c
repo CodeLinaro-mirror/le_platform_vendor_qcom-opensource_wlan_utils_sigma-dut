@@ -765,6 +765,7 @@ int main(int argc, char *argv[])
 	sigma_dut.default_timeout = 120;
 	sigma_dut.dialog_token = 0;
 	sigma_dut.dpp_conf_id = -1;
+	sigma_dut.dpp_local_bootstrap = -1;
 	set_defaults(&sigma_dut);
 
 	for (;;) {
@@ -1071,6 +1072,7 @@ int main(int argc, char *argv[])
 	sigma_dut.btm_query_cand_list = NULL;
 	free(sigma_dut.rsne_override);
 	free(sigma_dut.ap_sae_groups);
+	free(sigma_dut.dpp_peer_uri);
 	sigma_dut_unreg_cmds(&sigma_dut);
 
 	return 0;
