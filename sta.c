@@ -1102,6 +1102,9 @@ static int cmd_sta_get_mac_address(struct sigma_dut *dut,
 	/* const char *intf = get_param(cmd, "Interface"); */
 	char addr[20], resp[50];
 
+	if (dut->dev_role == DEVROLE_STA_CFON)
+		return sta_cfon_get_mac_address(dut, conn, cmd);
+
 	if (get_wpa_status(get_station_ifname(), "address", addr, sizeof(addr))
 	    < 0)
 		return -2;
@@ -1449,6 +1452,13 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 	}
 
 	dut->sta_pmf = STA_PMF_DISABLED;
+
+	if (dut->program == PROGRAM_OCE) {
+		dut->sta_pmf = STA_PMF_OPTIONAL;
+		if (set_network(ifname, id, "ieee80211w", "1") < 0)
+			return -2;
+	}
+
 	val = get_param(cmd, "PMF");
 	if (val) {
 		if (strcasecmp(val, "Required") == 0 ||
@@ -1584,7 +1594,7 @@ static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			  const char *ifname, int username_identity,
 			  struct sigma_cmd *cmd)
 {
-	const char *val, *alg;
+	const char *val, *alg, *akm;
 	int id;
 	char buf[200];
 #ifdef ANDROID
@@ -1598,6 +1608,7 @@ static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	val = get_param(cmd, "keyMgmtType");
 	alg = get_param(cmd, "micAlg");
+	akm = get_param(cmd, "AKMSuiteType");
 
 	if (val && strcasecmp(val, "SuiteB") == 0) {
 		if (set_network(ifname, id, "key_mgmt", "WPA-EAP-SUITE-B-192") <
@@ -1616,6 +1627,34 @@ static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		   dut->sta_pmf == STA_PMF_REQUIRED) {
 		if (set_network(ifname, id, "key_mgmt",
 				"WPA-EAP WPA-EAP-SHA256") < 0)
+			return -2;
+	} else if (akm && atoi(akm) == 14) {
+		if (dut->sta_pmf == STA_PMF_OPTIONAL ||
+		    dut->sta_pmf == STA_PMF_REQUIRED) {
+			if (set_network(ifname, id, "key_mgmt",
+					"WPA-EAP-SHA256 FILS-SHA256") < 0)
+				return -2;
+		} else {
+			if (set_network(ifname, id, "key_mgmt",
+					"WPA-EAP FILS-SHA256") < 0)
+				return -2;
+		}
+
+		if (set_network(ifname, id, "erp", "1") < 0)
+			return -2;
+	} else if (akm && atoi(akm) == 15) {
+		if (dut->sta_pmf == STA_PMF_OPTIONAL ||
+		    dut->sta_pmf == STA_PMF_REQUIRED) {
+			if (set_network(ifname, id, "key_mgmt",
+					"WPA-EAP-SHA256 FILS-SHA384") < 0)
+				return -2;
+		} else {
+			if (set_network(ifname, id, "key_mgmt",
+					"WPA-EAP FILS-SHA384") < 0)
+				return -2;
+		}
+
+		if (set_network(ifname, id, "erp", "1") < 0)
 			return -2;
 	} else if (dut->sta_pmf == STA_PMF_OPTIONAL) {
 		if (set_network(ifname, id, "key_mgmt",
@@ -2477,6 +2516,28 @@ static int cmd_sta_set_wmm(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int find_network(struct sigma_dut *dut, const char *ssid)
+{
+	char list[4096];
+	char *pos;
+
+	sigma_dut_print(dut, DUT_MSG_DEBUG,
+			"Search for profile based on SSID: '%s'", ssid);
+	if (wpa_command_resp(get_station_ifname(), "LIST_NETWORKS",
+			     list, sizeof(list)) < 0)
+		return -1;
+	pos = strstr(list, ssid);
+	if (!pos || pos == list || pos[-1] != '\t' || pos[strlen(ssid)] != '\t')
+		return -1;
+
+	while (pos > list && pos[-1] != '\n')
+		pos--;
+	dut->infra_network_id = atoi(pos);
+	snprintf(dut->infra_ssid, sizeof(dut->infra_ssid), "%s", ssid);
+	return 0;
+}
+
+
 static int cmd_sta_associate(struct sigma_dut *dut, struct sigma_conn *conn,
 			     struct sigma_cmd *cmd)
 {
@@ -2531,11 +2592,14 @@ static int cmd_sta_associate(struct sigma_dut *dut, struct sigma_conn *conn,
 				return -2;
 		}
 	} else {
-		if (strcmp(ssid, dut->infra_ssid) != 0) {
-			printf("No network parameters known for network "
-			       "(ssid='%s')", ssid);
-			send_resp(dut, conn, SIGMA_ERROR, "ErrorCode,"
-				  "No network parameters known for network");
+		if (strcmp(ssid, dut->infra_ssid) == 0) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"sta_associate for the most recently added network");
+		} else if (find_network(dut, ssid) < 0) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"sta_associate for a previously stored network profile");
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Profile not found");
 			return 0;
 		}
 
@@ -2867,6 +2931,32 @@ static int cmd_sta_preset_testparameters_hs2_r2(struct sigma_dut *dut,
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Unsupported FileType");
 		return 0;
+	}
+
+	return 1;
+}
+
+
+static int cmd_sta_preset_testparameters_oce(struct sigma_dut *dut,
+					     struct sigma_conn *conn,
+					     const char *intf,
+					     struct sigma_cmd *cmd)
+{
+	const char *val;
+
+	val = get_param(cmd, "OCESupport");
+	if (val && strcasecmp(val, "Disable") == 0) {
+		if (wpa_command(intf, "SET oce 0") < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to disable OCE");
+			return 0;
+		}
+	} else if (val && strcasecmp(val, "Enable") == 0) {
+		if (wpa_command(intf, "SET oce 1") < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to enable OCE");
+			return 0;
+		}
 	}
 
 	return 1;
@@ -3379,6 +3469,9 @@ static int cmd_sta_preset_testparameters(struct sigma_dut *dut,
 
 		return 1;
 	}
+
+	if (val && strcasecmp(val, "OCE") == 0)
+		return cmd_sta_preset_testparameters_oce(dut, conn, intf, cmd);
 
 #if 0
 	val = get_param(cmd, "Supplicant");
@@ -4484,6 +4577,12 @@ static int cmd_sta_disconnect(struct sigma_dut *dut, struct sigma_conn *conn,
 			      struct sigma_cmd *cmd)
 {
 	const char *intf = get_param(cmd, "Interface");
+
+	if (dut->program == PROGRAM_OCE) {
+		wpa_command(intf, "DISCONNECT");
+		return 1;
+	}
+
 	disconnect_station(dut);
 	/* Try to ignore old scan results to avoid HS 2.0R2 test case failures
 	 * due to cached results. */
@@ -4937,6 +5036,7 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 	const char *intf = get_param(cmd, "Interface");
 	const char *type;
 	const char *program = get_param(cmd, "program");
+	const char *dev_role = get_param(cmd, "DevRole");
 
 	if (!program)
 		program = get_param(cmd, "prog");
@@ -5018,6 +5118,7 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 
 	wpa_command(intf, "WPS_ER_STOP");
 	wpa_command(intf, "FLUSH");
+	wpa_command(intf, "ERP_FLUSH");
 	wpa_command(intf, "SET radio_disabled 0");
 
 	if (dut->tmp_mac_addr && dut->set_macaddr) {
@@ -5075,8 +5176,20 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 	dut->sae_commit_override = NULL;
 
 	dut->dpp_conf_id = -1;
+	free(dut->dpp_peer_uri);
+	dut->dpp_peer_uri = NULL;
+	dut->dpp_local_bootstrap = -1;
+	wpa_command(intf, "SET dpp_config_processing 2");
 
 	wpa_command(intf, "VENDOR_ELEM_REMOVE 13 *");
+
+	if (dut->program == PROGRAM_OCE)
+		wpa_command(intf, "SET oce 1");
+
+	if (dev_role && strcasecmp(dev_role, "STA-CFON") == 0) {
+		dut->dev_role = DEVROLE_STA_CFON;
+		return sta_cfon_reset_default(dut, conn, cmd);
+	}
 
 	if (dut->program != PROGRAM_VHT)
 		return cmd_sta_p2p_reset(dut, conn, cmd);
@@ -5516,6 +5629,22 @@ static int sta_set_wireless_60g(struct sigma_dut *dut,
 }
 
 
+static int sta_set_wireless_oce(struct sigma_dut *dut, struct sigma_conn *conn,
+				struct sigma_cmd *cmd)
+{
+	int status;
+	const char *intf = get_param(cmd, "Interface");
+	const char *val = get_param(cmd, "DevRole");
+
+	if (val && strcasecmp(val, "STA-CFON") == 0) {
+		status = sta_cfon_set_wireless(dut, conn, cmd);
+		if (status)
+			return status;
+	}
+	return cmd_sta_set_wireless_common(intf, dut, conn, cmd);
+}
+
+
 static int cmd_sta_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 				struct sigma_cmd *cmd)
 {
@@ -5529,6 +5658,8 @@ static int cmd_sta_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			return cmd_sta_set_wireless_vht(dut, conn, cmd);
 		if (strcasecmp(val, "60ghz") == 0)
 			return sta_set_wireless_60g(dut, conn, cmd);
+		if (strcasecmp(val, "OCE") == 0)
+			return sta_set_wireless_oce(dut, conn, cmd);
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Program value not supported");
 	} else {
@@ -8443,8 +8574,9 @@ static int cmd_sta_scan(struct sigma_dut *dut, struct sigma_conn *conn,
 			struct sigma_cmd *cmd)
 {
 	const char *intf = get_param(cmd, "Interface");
-	const char *val;
+	const char *val, *bssid, *ssid;
 	char buf[100];
+	char ssid_hex[65];
 	int res;
 
 	val = get_param(cmd, "HESSID");
@@ -8464,7 +8596,27 @@ static int cmd_sta_scan(struct sigma_dut *dut, struct sigma_conn *conn,
 		wpa_command(intf, buf);
 	}
 
-	if (wpa_command(intf, "SCAN")) {
+	bssid = get_param(cmd, "Bssid");
+	ssid = get_param(cmd, "Ssid");
+
+	if (ssid) {
+		if (2 * strlen(ssid) >= sizeof(ssid_hex)) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Too long SSID");
+			return 0;
+		}
+		ascii2hexstr(ssid, ssid_hex);
+	}
+
+	res = snprintf(buf, sizeof(buf), "SCAN%s%s%s%s",
+			bssid ? " bssid=": "",
+			bssid ? bssid : "",
+			ssid ? " ssid " : "",
+			ssid ? ssid_hex : "");
+	if (res < 0 || res >= (int) sizeof(buf))
+		return -1;
+
+	if (wpa_command(intf, buf)) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Could not start "
 			  "scan");
 		return 0;
@@ -8797,6 +8949,86 @@ static int cmd_sta_wps_connect_pw_token(struct sigma_dut *dut,
 }
 
 
+static int cmd_start_wps_registration(struct sigma_dut *dut,
+				      struct sigma_conn *conn,
+				      struct sigma_cmd *cmd)
+{
+	struct wpa_ctrl *ctrl;
+	const char *intf = get_param(cmd, "Interface");
+	const char *role, *method;
+	int res;
+	char buf[256];
+	const char *events[] = {
+		"CTRL-EVENT-CONNECTED",
+		"WPS-OVERLAP-DETECTED",
+		"WPS-TIMEOUT",
+		"WPS-FAIL",
+		NULL
+	};
+
+	ctrl = open_wpa_mon(intf);
+	if (!ctrl) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to open wpa_supplicant monitor connection");
+		return -2;
+	}
+
+	role = get_param(cmd, "WpsRole");
+	if (!role) {
+		send_resp(dut, conn, SIGMA_INVALID,
+			  "ErrorCode,WpsRole not provided");
+		goto fail;
+	}
+
+	if (strcasecmp(role, "Enrollee") == 0) {
+		method = get_param(cmd, "WpsConfigMethod");
+		if (!method) {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "ErrorCode,WpsConfigMethod not provided");
+			goto fail;
+		}
+		if (strcasecmp(method, "PBC") == 0) {
+			if (wpa_command(intf, "WPS_PBC") < 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to enable PBC");
+				goto fail;
+			}
+		} else {
+			/* TODO: PIN method */
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Unsupported WpsConfigMethod value");
+			goto fail;
+		}
+		res = get_wpa_cli_events(dut, ctrl, events, buf, sizeof(buf));
+		if (res < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,WPS connection did not complete");
+			goto fail;
+		}
+		if (strstr(buf, "WPS-TIMEOUT")) {
+			send_resp(dut, conn, SIGMA_ERROR, "ErrorCode,NoPeer");
+		} else if (strstr(buf, "WPS-OVERLAP-DETECTED")) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,OverlapSession");
+		} else if (strstr(buf, "CTRL-EVENT-CONNECTED")) {
+			send_resp(dut, conn, SIGMA_COMPLETE, "Successful");
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,WPS operation failed");
+		}
+	} else {
+		/* TODO: Registrar role */
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,Unsupported WpsRole value");
+	}
+
+fail:
+	wpa_ctrl_detach(ctrl);
+	wpa_ctrl_close(ctrl);
+	return 0;
+}
+
+
 static int req_intf(struct sigma_cmd *cmd)
 {
 	return get_param(cmd, "interface") == NULL ? -1 : 0;
@@ -8869,4 +9101,6 @@ void sta_register_cmds(void)
 	sigma_dut_reg_cmd("sta_exec_action", req_intf, cmd_sta_exec_action);
 	sigma_dut_reg_cmd("sta_get_events", req_intf, cmd_sta_get_events);
 	sigma_dut_reg_cmd("sta_get_parameter", req_intf, cmd_sta_get_parameter);
+	sigma_dut_reg_cmd("start_wps_registration", req_intf,
+			  cmd_start_wps_registration);
 }
