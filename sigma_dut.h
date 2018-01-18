@@ -397,6 +397,7 @@ struct sigma_dut {
 		AP_PMF_REQUIRED
 	} ap_pmf;
 	enum ap_cipher {
+		AP_NO_GROUP_CIPHER_SET,
 		AP_CCMP,
 		AP_TKIP,
 		AP_WEP,
@@ -405,7 +406,8 @@ struct sigma_dut {
 		AP_GCMP_256,
 		AP_GCMP_128,
 		AP_CCMP_256,
-	} ap_cipher;
+		AP_CCMP_128_GCMP_256,
+	} ap_cipher, ap_group_cipher;
 	enum ap_group_mgmt_cipher {
 		AP_NO_GROUP_MGMT_CIPHER_SET,
 		AP_BIP_GMAC_256,
@@ -417,6 +419,7 @@ struct sigma_dut {
 	int sae_anti_clogging_threshold;
 	int sae_reflection;
 	char ap_passphrase[101];
+	char ap_psk[65];
 	char ap_wepkey[27];
 	char ap_radius_ipaddr[20];
 	int ap_radius_port;
@@ -596,6 +599,7 @@ struct sigma_dut {
 		PROGRAM_MBO,
 		PROGRAM_IOTLP,
 		PROGRAM_DPP,
+		PROGRAM_OCE,
 	} program;
 
 	enum device_type {
@@ -612,6 +616,7 @@ struct sigma_dut {
 		DEVROLE_UNKNOWN = 0,
 		DEVROLE_STA,
 		DEVROLE_PCP,
+		DEVROLE_STA_CFON
 	} dev_role;
 
 	const char *version;
@@ -654,7 +659,7 @@ struct sigma_dut {
 	const char *hostapd_ifname;
 	int hostapd_running;
 
-	int dpp_peer_bootstrap;
+	char *dpp_peer_uri;
 	int dpp_local_bootstrap;
 	int dpp_conf_id;
 };
@@ -696,6 +701,12 @@ int cmd_ap_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 		      struct sigma_cmd *cmd);
 int cmd_wlantest_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 			    struct sigma_cmd *cmd);
+int sta_cfon_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
+			  struct sigma_cmd *cmd);
+int sta_cfon_get_mac_address(struct sigma_dut *dut, struct sigma_conn *conn,
+			     struct sigma_cmd *cmd);
+int sta_cfon_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
+			   struct sigma_cmd *cmd);
 
 enum driver_type {
 	DRIVER_NOT_SET,
