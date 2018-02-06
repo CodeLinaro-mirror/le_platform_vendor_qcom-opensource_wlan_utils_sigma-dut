@@ -2,6 +2,7 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
+ * Copyright (c) 2018, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -704,7 +705,8 @@ static const char * const license1 =
 "----------------------------\n"
 "\n"
 "Copyright (c) 2010-2011, Atheros Communications, Inc.\n"
-"Copyright (c) 2011-2015, Qualcomm Atheros, Inc.\n"
+"Copyright (c) 2011-2017, Qualcomm Atheros, Inc.\n"
+"Copyright (c) 2018, The Linux Foundation\n"
 "All Rights Reserved.\n"
 "Licensed under the Clear BSD license.\n"
 "\n";
@@ -1074,6 +1076,9 @@ int main(int argc, char *argv[])
 	free(sigma_dut.ap_sae_groups);
 	free(sigma_dut.dpp_peer_uri);
 	sigma_dut_unreg_cmds(&sigma_dut);
+#ifdef ANDROID
+	hlp_thread_cleanup(&sigma_dut);
+#endif /* ANDROID */
 
 	return 0;
 }

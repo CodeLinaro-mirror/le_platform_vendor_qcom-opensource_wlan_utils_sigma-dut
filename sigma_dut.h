@@ -66,6 +66,7 @@ struct sigma_dut;
 #define VHT_DEFAULT_OPER_CHWIDTH AP_80_VHT_OPER_CHWIDTH
 
 typedef unsigned int u32;
+typedef uint16_t u16;
 typedef unsigned char u8;
 
 #define WPA_GET_BE32(a) ((((u32) (a)[0]) << 24) | (((u32) (a)[1]) << 16) | \
@@ -363,6 +364,7 @@ struct sigma_dut {
 		AP_40,
 		AP_80,
 		AP_160,
+		AP_80_80,
 		AP_AUTO
 	} ap_chwidth;
 	enum ap_chwidth default_11na_ap_chwidth;
@@ -387,9 +389,11 @@ struct sigma_dut {
 	enum ap_tag_key_mgmt {
 		AP2_OPEN,
 		AP2_OSEN,
-		AP2_WPA2_PSK
+		AP2_WPA2_PSK,
+		AP2_WPA2_OWE,
 	} ap_tag_key_mgmt[MAX_WLAN_TAGS - 1];
 	int ap_add_sha256;
+	int ap_add_sha384;
 	int ap_rsn_preauth;
 	enum ap_pmf {
 		AP_PMF_DISABLED,
@@ -520,12 +524,41 @@ struct sigma_dut {
 	unsigned char ap_cell_cap_pref;
 	int ap_ft_oa;
 	int ap_name;
+	int ap_interface_5g;
+	int ap_interface_2g;
+	int ap_assoc_delay;
+	int ap_btmreq_bss_term_tsf;
+	int ap_fils_dscv_int;
+	int ap_nairealm_int;
+	char ap_nairealm[33];
+	int ap_blechanutil;
+	int ap_ble_admit_cap;
+	int ap_datappdudura;
+	int ap_airtimefract;
+	char ap_dhcpserv_ipaddr[20];
+	int ap_dhcp_stop;
+	int ap_bawinsize;
+	int ap_blestacnt;
+	int ap_ul_availcap;
+	int ap_dl_availcap;
+	int ap_akm;
+	int ap_pmksa;
+	int ap_pmksa_caching;
+	int ap_80plus80;
+	int ap_oper_chn;
 
 	struct mbo_pref_ap mbo_pref_aps[MBO_MAX_PREF_BSSIDS];
 	struct mbo_pref_ap mbo_self_ap_tuple;
 	int mbo_pref_ap_cnt;
 	unsigned char ft_bss_mac_list[MAX_FT_BSS_LIST][ETH_ALEN];
 	int ft_bss_mac_cnt;
+
+	enum value_not_set_enabled_disabled ap_oce;
+	enum value_not_set_enabled_disabled ap_filsdscv;
+	enum value_not_set_enabled_disabled ap_filshlp;
+	enum value_not_set_enabled_disabled ap_broadcast_ssid;
+	enum value_not_set_enabled_disabled ap_rnr;
+	enum value_not_set_enabled_disabled ap_esp;
 
 	const char *hostapd_debug_log;
 
@@ -662,6 +695,9 @@ struct sigma_dut {
 	char *dpp_peer_uri;
 	int dpp_local_bootstrap;
 	int dpp_conf_id;
+
+	u8 fils_hlp;
+	pthread_t hlp_thread;
 };
 
 
@@ -767,6 +803,10 @@ int ath_set_width(struct sigma_dut *dut, struct sigma_conn *conn,
 		  const char *intf, const char *val);
 int wil6210_send_frame_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 			   struct sigma_cmd *cmd);
+int hwaddr_aton(const char *txt, unsigned char *addr);
+int set_ipv4_addr(struct sigma_dut *dut, const char *ifname,
+		  const char *ip, const char *mask);
+int set_ipv4_gw(struct sigma_dut *dut, const char *gw);
 
 /* p2p.c */
 int p2p_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
@@ -792,6 +832,7 @@ void convert_mac_addr_to_ipv6_lladdr(u8 *mac_addr, char *ipv6_buf,
 size_t strlcpy(char *dest, const char *src, size_t siz);
 size_t strlcat(char *dst, const char *str, size_t size);
 #endif /* ANDROID */
+void hex_dump(struct sigma_dut *dut, u8 *data, size_t len);
 
 
 /* uapsd_stream.c */
@@ -829,5 +870,8 @@ int loc_cmd_sta_preset_testparameters(struct sigma_dut *dut,
 int dpp_dev_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 			struct sigma_cmd *cmd);
 
+/* dhcp.c */
+void process_fils_hlp(struct sigma_dut *dut);
+void hlp_thread_cleanup(struct sigma_dut *dut);
 
 #endif /* SIGMA_DUT_H */
