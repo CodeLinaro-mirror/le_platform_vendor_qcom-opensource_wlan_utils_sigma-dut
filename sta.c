@@ -1,7 +1,8 @@
 /*
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
- * Copyright (c) 2011-2015, Qualcomm Atheros, Inc.
+ * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
+ * Copyright (c) 2018, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -909,6 +910,38 @@ static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
 #endif /* ANDROID */
 
 
+int set_ipv4_addr(struct sigma_dut *dut, const char *ifname,
+		  const char *ip, const char *mask)
+{
+	char buf[200];
+
+	snprintf(buf, sizeof(buf), "ifconfig %s %s netmask %s",
+		 ifname, ip, mask);
+	return system(buf) == 0;
+}
+
+
+int set_ipv4_gw(struct sigma_dut *dut, const char *gw)
+{
+	char buf[200];
+
+	if (!is_ip_addr(gw)) {
+		sigma_dut_print(dut, DUT_MSG_DEBUG, "Invalid gw addr - %s", gw);
+		return -1;
+	}
+
+	snprintf(buf, sizeof(buf), "route add default gw %s", gw);
+	if (!dut->no_ip_addr_set && system(buf) != 0) {
+		snprintf(buf, sizeof(buf), "ip ro re default via %s",
+			 gw);
+		if (system(buf) != 0)
+			return 0;
+	}
+
+	return 1;
+}
+
+
 static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 				 struct sigma_conn *conn,
 				 struct sigma_cmd *cmd)
@@ -936,7 +969,7 @@ static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 	val = get_param(cmd, "Type");
 	if (val) {
 		type = atoi(val);
-		if (type != 1 && type != 2) {
+		if (type < 1 || type > 3) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,Unsupported address type");
 			return 0;
@@ -966,10 +999,15 @@ static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 			/* Assume this happens by default */
 			return 1;
 		}
+		if (type != 3) {
+			kill_dhcp_client(dut, ifname);
+			if (start_dhcp_client(dut, ifname) < 0)
+				return -2;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"Using FILS HLP DHCPv4 Rapid Commit");
+		}
 
-		kill_dhcp_client(dut, ifname);
-		if (start_dhcp_client(dut, ifname) < 0)
-			return -2;
 		return 1;
 #endif /* __linux__ */
 		return -2;
@@ -1039,9 +1077,7 @@ static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 	kill_dhcp_client(dut, ifname);
 
 	if (!dut->no_ip_addr_set) {
-		snprintf(buf, sizeof(buf), "ifconfig %s %s netmask %s",
-			 ifname, ip, mask);
-		if (system(buf) != 0) {
+		if (!set_ipv4_addr(dut, ifname, ip, mask)) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,Failed to set IP address");
 			return 0;
@@ -1050,18 +1086,10 @@ static int cmd_sta_set_ip_config(struct sigma_dut *dut,
 
 	gw = get_param(cmd, "defaultGateway");
 	if (gw) {
-		if (!is_ip_addr(gw))
-			return -1;
-		snprintf(buf, sizeof(buf), "route add default gw %s", gw);
-		if (!dut->no_ip_addr_set && system(buf) != 0) {
-			snprintf(buf, sizeof(buf), "ip ro re default via %s",
-				 gw);
-			if (system(buf) != 0) {
-				send_resp(dut, conn, SIGMA_ERROR,
-					  "ErrorCode,Failed "
-					  "to set default gateway");
-				return 0;
-			}
+		if (set_ipv4_gw(dut, gw) < 1) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to set default gateway");
+			return 0;
 		}
 	}
 
@@ -1313,6 +1341,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 	int id;
 	int cipher_set = 0;
 	int owe;
+	int suite_b = 0;
 
 	id = add_network_common(dut, conn, ifname, cmd);
 	if (id < 0)
@@ -1343,6 +1372,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (set_network(ifname, id, "proto", "WPA WPA2") < 0)
 			return -2;
 	} else if (strcasecmp(val, "SuiteB") == 0) {
+		suite_b = 1;
 		if (set_network(ifname, id, "proto", "WPA2") < 0)
 			return -2;
 	} else if (strcasecmp(val, "OWE") == 0) {
@@ -1477,6 +1507,10 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			send_resp(dut, conn, SIGMA_INVALID, "errorCode,Unrecognized PMF value");
 			return 0;
 		}
+	} else if (owe || suite_b) {
+		dut->sta_pmf = STA_PMF_REQUIRED;
+		if (set_network(ifname, id, "ieee80211w", "2") < 0)
+			return -2;
 	}
 
 	return id;
@@ -1488,6 +1522,7 @@ static int cmd_sta_set_psk(struct sigma_dut *dut, struct sigma_conn *conn,
 {
 	const char *intf = get_param(cmd, "Interface");
 	const char *type = get_param(cmd, "Type");
+	const char *pmf = get_param(cmd, "PMF");
 	const char *ifname, *val, *alg;
 	int id;
 
@@ -1519,6 +1554,11 @@ static int cmd_sta_set_psk(struct sigma_dut *dut, struct sigma_conn *conn,
 					"Failed to clear sae_groups to default");
 			return -2;
 		}
+		if (!pmf) {
+			dut->sta_pmf = STA_PMF_REQUIRED;
+			if (set_network(ifname, id, "ieee80211w", "2") < 0)
+				return -2;
+		}
 	} else if (type && strcasecmp(type, "PSK-SAE") == 0) {
 		if (val && strcasecmp(val, "wpa2-ft") == 0) {
 			if (set_network(ifname, id, "key_mgmt",
@@ -1533,6 +1573,11 @@ static int cmd_sta_set_psk(struct sigma_dut *dut, struct sigma_conn *conn,
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to clear sae_groups to default");
 			return -2;
+		}
+		if (!pmf) {
+			dut->sta_pmf = STA_PMF_OPTIONAL;
+			if (set_network(ifname, id, "ieee80211w", "1") < 0)
+				return -2;
 		}
 	} else if (alg && strcasecmp(alg, "SHA-256") == 0) {
 		if (set_network(ifname, id, "key_mgmt", "WPA-PSK-SHA256") < 0)
@@ -2571,6 +2616,10 @@ static int cmd_sta_associate(struct sigma_dut *dut, struct sigma_conn *conn,
 			return 0;
 		}
 	}
+#ifdef ANDROID
+	if (dut->fils_hlp)
+		process_fils_hlp(dut);
+#endif /* ANDROID */
 
 	if (wps_param &&
 	    (strcmp(wps_param, "1") == 0 || strcasecmp(wps_param, "On") == 0))
@@ -2943,6 +2992,9 @@ static int cmd_sta_preset_testparameters_oce(struct sigma_dut *dut,
 					     struct sigma_cmd *cmd)
 {
 	const char *val;
+	char buf[1000];
+	char text[20];
+	unsigned char addr[ETH_ALEN];
 
 	val = get_param(cmd, "OCESupport");
 	if (val && strcasecmp(val, "Disable") == 0) {
@@ -2957,6 +3009,52 @@ static int cmd_sta_preset_testparameters_oce(struct sigma_dut *dut,
 				  "ErrorCode,Failed to enable OCE");
 			return 0;
 		}
+	}
+
+	val = get_param(cmd, "FILScap");
+	if (val && (atoi(val) == 1)) {
+		if (wpa_command(intf, "SET disable_fils 0") < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to enable FILS");
+			return 0;
+		}
+	} else if (val && (atoi(val) == 0)) {
+		if (wpa_command(intf, "SET disable_fils 1") < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to disable FILS");
+			return 0;
+		}
+	}
+
+	val = get_param(cmd, "FILSHLP");
+	if (val && strcasecmp(val, "Enable") == 0) {
+		if (get_wpa_status(get_station_ifname(), "address", text,
+				   sizeof(text)) < 0)
+			return -2;
+		hwaddr_aton(text, addr);
+		snprintf(buf, sizeof(buf),
+			 "FILS_HLP_REQ_ADD ff:ff:ff:ff:ff:ff "
+			 "080045100140000040004011399e00000000ffffffff00440043"
+			 "012cb30001010600fd4f46410000000000000000000000000000"
+			 "000000000000"
+			 "%02x%02x%02x%02x%02x%02x"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000000000000000"
+			 "0000000000000000000000000000000000000000638253633501"
+			 "013d0701000af549d29b390205dc3c12616e64726f69642d6468"
+			 "63702d382e302e30370a0103060f1a1c333a3b2b5000ff00",
+			 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+		if (wpa_command(intf, buf)) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to add HLP");
+			return 0;
+		}
+		dut->fils_hlp = 1;
 	}
 
 	return 1;
@@ -4577,8 +4675,10 @@ static int cmd_sta_disconnect(struct sigma_dut *dut, struct sigma_conn *conn,
 			      struct sigma_cmd *cmd)
 {
 	const char *intf = get_param(cmd, "Interface");
+	const char *val = get_param(cmd, "maintain_profile");
 
-	if (dut->program == PROGRAM_OCE) {
+	if (dut->program == PROGRAM_OCE ||
+	    (val && atoi(val) == 1)) {
 		wpa_command(intf, "DISCONNECT");
 		return 1;
 	}
@@ -5136,7 +5236,8 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 		wpa_command(intf, "SET hs20 1");
 	}
 
-	if (dut->program == PROGRAM_HS2_R2) {
+	if (dut->program == PROGRAM_HS2_R2 ||
+	    dut->program == PROGRAM_OCE) {
 		wpa_command(intf, "SET pmf 1");
 	} else {
 		wpa_command(intf, "SET pmf 0");
@@ -5183,8 +5284,15 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 
 	wpa_command(intf, "VENDOR_ELEM_REMOVE 13 *");
 
-	if (dut->program == PROGRAM_OCE)
+	if (dut->program == PROGRAM_OCE) {
 		wpa_command(intf, "SET oce 1");
+		wpa_command(intf, "SET disable_fils 0");
+		wpa_command(intf, "FILS_HLP_REQ_FLUSH");
+		dut->fils_hlp = 0;
+#ifdef ANDROID
+		hlp_thread_cleanup(dut);
+#endif /* ANDROID */
+	}
 
 	if (dev_role && strcasecmp(dev_role, "STA-CFON") == 0) {
 		dut->dev_role = DEVROLE_STA_CFON;
@@ -8626,6 +8734,85 @@ static int cmd_sta_scan(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int cmd_sta_scan_bss(struct sigma_dut *dut, struct sigma_conn *conn,
+			    struct sigma_cmd *cmd)
+{
+	const char *intf = get_param(cmd, "Interface");
+	const char *bssid;
+	char buf[4096], *pos;
+	int freq, chan;
+	char *ssid;
+	char resp[100];
+	int res;
+	struct wpa_ctrl *ctrl;
+
+	bssid = get_param(cmd, "BSSID");
+	if (!bssid) {
+		send_resp(dut, conn, SIGMA_INVALID,
+			  "errorCode,BSSID argument is missing");
+		return 0;
+	}
+
+	ctrl = open_wpa_mon(intf);
+	if (!ctrl) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to open wpa_supplicant monitor connection");
+		return -1;
+	}
+
+	if (wpa_command(intf, "SCAN TYPE=ONLY")) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Could not start scan");
+		wpa_ctrl_detach(ctrl);
+		wpa_ctrl_close(ctrl);
+		return 0;
+	}
+
+	res = get_wpa_cli_event(dut, ctrl, "CTRL-EVENT-SCAN-RESULTS",
+				buf, sizeof(buf));
+
+	wpa_ctrl_detach(ctrl);
+	wpa_ctrl_close(ctrl);
+
+	if (res < 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Scan did not complete");
+		return 0;
+	}
+
+	snprintf(buf, sizeof(buf), "BSS %s", bssid);
+	if (wpa_command_resp(intf, buf, buf, sizeof(buf)) < 0 ||
+	    strncmp(buf, "id=", 3) != 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Specified BSSID not found");
+		return 0;
+	}
+
+	pos = strstr(buf, "\nfreq=");
+	if (!pos) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Channel not found");
+		return 0;
+	}
+	freq = atoi(pos + 6);
+	chan = freq_to_channel(freq);
+
+	pos = strstr(buf, "\nssid=");
+	if (!pos) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,SSID not found");
+		return 0;
+	}
+	ssid = pos + 6;
+	pos = strchr(ssid, '\n');
+	if (pos)
+		*pos = '\0';
+	snprintf(resp, sizeof(resp), "ssid,%s,bsschannel,%d", ssid, chan);
+	send_resp(dut, conn, SIGMA_COMPLETE, resp);
+	return 0;
+}
+
+
 static int cmd_sta_set_systime(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd)
 {
@@ -9092,6 +9279,7 @@ void sta_register_cmds(void)
 	sigma_dut_reg_cmd("sta_add_credential", req_intf,
 			  cmd_sta_add_credential);
 	sigma_dut_reg_cmd("sta_scan", req_intf, cmd_sta_scan);
+	sigma_dut_reg_cmd("sta_scan_bss", req_intf, cmd_sta_scan_bss);
 	sigma_dut_reg_cmd("sta_set_systime", NULL, cmd_sta_set_systime);
 	sigma_dut_reg_cmd("sta_osu", req_intf, cmd_sta_osu);
 	sigma_dut_reg_cmd("sta_policy_update", req_intf, cmd_sta_policy_update);
