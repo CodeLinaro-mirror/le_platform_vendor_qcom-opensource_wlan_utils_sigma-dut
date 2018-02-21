@@ -2583,6 +2583,44 @@ static int find_network(struct sigma_dut *dut, const char *ssid)
 }
 
 
+#ifdef NL80211_SUPPORT
+static int sta_config_rsnie(struct sigma_dut *dut, int val)
+{
+	struct nl_msg *msg;
+	int ret;
+	struct nlattr *params;
+	int ifindex;
+
+	ifindex = if_nametoindex("wlan0");
+	if (!(msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+				    NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)) ||
+	    nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_RSN_IE, val)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding vendor_cmd and vendor_data",
+				__func__);
+		nlmsg_free(msg);
+		return -1;
+	}
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+		return ret;
+	}
+
+	return 0;
+}
+#endif /* NL80211_SUPPORT */
+
+
 static int cmd_sta_associate(struct sigma_dut *dut, struct sigma_conn *conn,
 			     struct sigma_cmd *cmd)
 {
@@ -2598,6 +2636,12 @@ static int cmd_sta_associate(struct sigma_dut *dut, struct sigma_conn *conn,
 		return -1;
 
 	if (dut->rsne_override) {
+#ifdef NL80211_SUPPORT
+		if (get_driver_type() == DRIVER_WCN) {
+			sta_config_rsnie(dut, 1);
+			dut->config_rsnie = 1;
+		}
+#endif /* NL80211_SUPPORT */
 		snprintf(buf, sizeof(buf), "TEST_ASSOC_IE %s",
 			 dut->rsne_override);
 		if (wpa_command(get_station_ifname(), buf) < 0) {
@@ -4700,9 +4744,11 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *val = get_param(cmd, "CHANNEL");
 	struct wpa_ctrl *ctrl;
 	char buf[100];
+	char result[32];
 	int res;
 	int chan = 0;
 	int status = 0;
+	int fastreassoc = 1;
 
 	if (bssid == NULL) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Missing bssid "
@@ -4730,7 +4776,15 @@ static int cmd_sta_reassoc(struct sigma_dut *dut, struct sigma_conn *conn,
 		return -1;
 	}
 
-	if (wifi_chip_type == DRIVER_WCN) {
+	if (get_wpa_status(get_station_ifname(), "wpa_state", result,
+			   sizeof(result)) < 0 ||
+	    strncmp(result, "COMPLETED", 9) != 0) {
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"sta_reassoc: Not connected");
+		fastreassoc = 0;
+	}
+
+	if (wifi_chip_type == DRIVER_WCN && fastreassoc) {
 #ifdef ANDROID
 		if (chan) {
 			unsigned int freq;
@@ -5294,6 +5348,14 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 #endif /* ANDROID */
 	}
 
+#ifdef NL80211_SUPPORT
+	if (get_driver_type() == DRIVER_WCN &&
+	    dut->config_rsnie == 1) {
+		dut->config_rsnie = 0;
+		sta_config_rsnie(dut, 0);
+	}
+#endif /* NL80211_SUPPORT */
+
 	if (dev_role && strcasecmp(dev_role, "STA-CFON") == 0) {
 		dut->dev_role = DEVROLE_STA_CFON;
 		return sta_cfon_reset_default(dut, conn, cmd);
@@ -5301,6 +5363,7 @@ static int cmd_sta_reset_default(struct sigma_dut *dut,
 
 	if (dut->program != PROGRAM_VHT)
 		return cmd_sta_p2p_reset(dut, conn, cmd);
+
 	return 1;
 }
 
