@@ -2648,6 +2648,13 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 			 */
 			int wlan_tag = j + 2;
 
+			if (wlan_tag == 2 && dut->program == PROGRAM_WPA3 &&
+			   (dut->ap_interface_5g || dut->ap_interface_2g)) {
+				snprintf(dut->ap_tag_ssid[wlan_tag - 2],
+					 sizeof(dut->ap_tag_ssid[wlan_tag - 2]),
+					 "%s-owe", dut->ap_ssid);
+			}
+
 			if (dut->ap_tag_ssid[j][0] == '\0')
 				continue;
 
@@ -7356,6 +7363,7 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->ft_bss_mac_cnt = 0;
 	dut->ap_interface_5g = 0;
 	dut->ap_interface_2g = 0;
+	dut->ap_pmf = AP_PMF_DISABLED;
 
 	if (dut->program == PROGRAM_HT || dut->program == PROGRAM_VHT) {
 		dut->ap_wme = AP_WME_ON;
@@ -7585,6 +7593,10 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 	dut->dpp_conf_id = -1;
 
 	dut->hostapd_running = 0;
+
+	if (get_openwrt_driver_type() == OPENWRT_DRIVER_ATHEROS)
+		return 1;
+
 	if (dut->use_hostapd_pid_file) {
 		kill_hostapd_process_pid(dut);
 	} else if (kill_process(dut, "(hostapd)", 1, SIGTERM) == 0 ||
