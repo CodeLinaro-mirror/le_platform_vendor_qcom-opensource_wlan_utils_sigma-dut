@@ -37,6 +37,7 @@ OBJS += ap.o
 OBJS += powerswitch.o
 OBJS += atheros.o
 OBJS += ftm.o
+OBJS += dpp.o
 
 ifndef NO_TRAFFIC_AGENT
 CFLAGS += -DCONFIG_TRAFFIC_AGENT -DCONFIG_WFA_WMM_AC
@@ -58,6 +59,17 @@ endif
 ifndef NO_SERVER
 CFLAGS += -DCONFIG_SERVER
 OBJS += server.o
+endif
+
+ifdef MIRACAST
+OBJS += miracast.o
+CFLAGS += -DMIRACAST -DMIRACAST_DHCP_M
+LIBS += -ldl
+endif
+
+ifdef NL80211_SUPPORT
+CFLAGS += -DNL80211_SUPPORT -I /usr/include/libnl3
+LIBS += -lnl-3 -lnl-genl-3
 endif
 
 sigma_dut: $(OBJS)
