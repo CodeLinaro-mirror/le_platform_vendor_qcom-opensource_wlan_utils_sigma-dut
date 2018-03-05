@@ -1339,7 +1339,10 @@ static int cmd_ap_send_addba_req(struct sigma_dut *dut, struct sigma_conn *conn,
 	case DRIVER_MAC80211:
 		if (stat("/sys/module/ath10k_core", &s) == 0)
 			return ath10k_ap_send_addba_req(dut, cmd);
-		/* fall through */
+		/* On AGL platform,  ath10k_core is not used, and addba req is
+		 * sent automatically, return 1 without operation.
+		 */
+		return 1;
 	default:
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,ap_send_addba_req not supported with this driver");
