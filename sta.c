@@ -4362,7 +4362,12 @@ static int cmd_sta_disconnect(struct sigma_dut *dut, struct sigma_conn *conn,
 			      struct sigma_cmd *cmd)
 {
 	const char *intf = get_param(cmd, "Interface");
-	disconnect_station(dut);
+
+	/* Disconnect without remove network. Do not use the function
+	 * disconnect_station() because it's possible to associate the previous
+	 * network after disconnect without add network again, e.g, 11N 5.2.53.
+	 */
+	wpa_command(get_station_ifname(), "DISCONNECT");
 	/* Try to ignore old scan results to avoid HS 2.0R2 test case failures
 	 * due to cached results. */
 	wpa_command(intf, "SET ignore_old_scan_res 1");
