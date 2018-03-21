@@ -35,7 +35,7 @@ static int dpp_hostapd_run(struct sigma_dut *dut)
 	if (!dut->ap_oper_chn)
 		dut->ap_channel = 11;
 	dut->ap_is_dual = 0;
-	dut->ap_mode = AP_11ng;
+	dut->ap_mode = dut->ap_channel <= 14 ? AP_11ng : AP_11na;
 	dut->ap_key_mgmt = AP_OPEN;
 	dut->ap_cipher = AP_PLAIN;
 	return cmd_ap_config_commit(dut, NULL, NULL) == 1 ? 0 : -1;
@@ -490,6 +490,25 @@ static int dpp_get_test(const char *step, const char *frame, const char *attr)
 }
 
 
+static int dpp_wait_tx(struct sigma_dut *dut, struct wpa_ctrl *ctrl,
+		       int frame_type)
+{
+	char buf[200], tmp[20];
+	int res;
+
+	snprintf(tmp, sizeof(tmp), "type=%d", frame_type);
+	for (;;) {
+		res = get_wpa_cli_event(dut, ctrl, "DPP-TX", buf, sizeof(buf));
+		if (res < 0)
+			return -1;
+		if (strstr(buf, tmp) != NULL)
+			break;
+	}
+
+	return 0;
+}
+
+
 static int dpp_wait_tx_status(struct sigma_dut *dut, struct wpa_ctrl *ctrl,
 			      int frame_type)
 {
@@ -580,9 +599,10 @@ static int dpp_scan_peer_qrcode(struct sigma_dut *dut)
 	unlink(dpp_qrcode_file);
 
 	snprintf(buf, sizeof(buf),
-		 "am start -n w1.fi.wpadebug/w1.fi.wpadebug.QrCodeScannerActivity");
+		 "am start -n w1.fi.wpadebug/w1.fi.wpadebug.QrCodeReadActivity");
 	if (system(buf) != 0) {
-		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to launch Scanner");
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to launch QR Code scanner");
 		return -1;
 	}
 
@@ -1039,20 +1059,27 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	}
 
 	if (groups_override) {
-		const char *extra = "";
-		char spaces[1500];
-
-		if (force_gas_fragm) {
-			memset(spaces, ' ', sizeof(spaces));
-			spaces[sizeof(spaces) - 1] = '\0';
-			extra = spaces;
-		}
-
-		snprintf(buf, sizeof(buf), "SET dpp_groups_override %s%s",
-			 groups_override, extra);
+		snprintf(buf, sizeof(buf), "SET dpp_groups_override %s",
+			 groups_override);
 		if (wpa_command(ifname, buf) < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,Failed to set cred:groups");
+			goto out;
+		}
+	}
+
+	if (force_gas_fragm) {
+		char spaces[1500];
+
+		memset(spaces, ' ', sizeof(spaces));
+		spaces[sizeof(spaces) - 1] = '\0';
+
+		snprintf(buf, sizeof(buf),
+			 "SET dpp_discovery_override {\"ssid\":\"DPPNET01\"}%s",
+			 spaces);
+		if (wpa_command(ifname, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to set discovery override");
 			goto out;
 		}
 	}
@@ -1442,6 +1469,24 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 		goto out;
 	}
 
+	if (!frametype && strcasecmp(bs, "PKEX") == 0 &&
+	    strcasecmp(auth_role, "Responder") == 0) {
+		if (dpp_wait_tx_status(dut, ctrl, 10) < 0) {
+			send_resp(dut, conn, SIGMA_COMPLETE,
+				  "BootstrapResult,Timeout");
+			goto out;
+		}
+	}
+
+	if (!frametype && strcasecmp(bs, "PKEX") == 0 &&
+	    strcasecmp(auth_role, "Initiator") == 0) {
+		if (dpp_wait_tx(dut, ctrl, 0) < 0) {
+			send_resp(dut, conn, SIGMA_COMPLETE,
+				  "BootstrapResult,Timeout");
+			goto out;
+		}
+	}
+
 	if (frametype && strcasecmp(frametype, "AuthenticationRequest") == 0) {
 		if (dpp_wait_tx_status(dut, ctrl, 0) < 0) {
 			send_resp(dut, conn, SIGMA_COMPLETE,
@@ -1503,6 +1548,12 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	}
 
 	if (check_mutual) {
+		if (strstr(buf, "DPP-NOT-COMPATIBLE")) {
+			send_resp(dut, conn, SIGMA_COMPLETE,
+				  "BootstrapResult,OK,AuthResult,ROLES_NOT_COMPATIBLE");
+			goto out;
+		}
+
 		if (!strstr(buf, "DPP-AUTH-DIRECTION")) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,No event for auth direction seen");
