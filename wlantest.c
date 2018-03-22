@@ -1,7 +1,7 @@
 /*
  * Sigma Control API DUT (wlantest)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
- * Copyright (c) 2011-2013, Qualcomm Atheros, Inc.
+ * Copyright (c) 2011-2013, 2017, Qualcomm Atheros, Inc.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -101,7 +101,7 @@ static int open_wlantest(void)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path + 1, WLANTEST_SOCK_NAME,
+	strlcpy(addr.sun_path + 1, WLANTEST_SOCK_NAME,
 		sizeof(addr.sun_path) - 1);
 	if (connect(s, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
 		perror("connect");
