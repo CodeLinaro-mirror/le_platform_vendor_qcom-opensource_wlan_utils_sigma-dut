@@ -550,6 +550,10 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 		else
 			conf_role = "sta-psk";
 		break;
+	default:
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Invalid ConfIndex [%d]", conf_index);
+		goto out;
 	}
 
 	if (strcasecmp(auth_role, "Initiator") == 0) {
