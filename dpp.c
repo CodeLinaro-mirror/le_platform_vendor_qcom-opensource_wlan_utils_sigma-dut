@@ -35,7 +35,7 @@ static int dpp_hostapd_run(struct sigma_dut *dut)
 	if (!dut->ap_oper_chn)
 		dut->ap_channel = 11;
 	dut->ap_is_dual = 0;
-	dut->ap_mode = AP_11ng;
+	dut->ap_mode = dut->ap_channel <= 14 ? AP_11ng : AP_11na;
 	dut->ap_key_mgmt = AP_OPEN;
 	dut->ap_cipher = AP_PLAIN;
 	return cmd_ap_config_commit(dut, NULL, NULL) == 1 ? 0 : -1;
@@ -599,9 +599,10 @@ static int dpp_scan_peer_qrcode(struct sigma_dut *dut)
 	unlink(dpp_qrcode_file);
 
 	snprintf(buf, sizeof(buf),
-		 "am start -n w1.fi.wpadebug/w1.fi.wpadebug.QrCodeScannerActivity");
+		 "am start -n w1.fi.wpadebug/w1.fi.wpadebug.QrCodeReadActivity");
 	if (system(buf) != 0) {
-		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to launch Scanner");
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to launch QR Code scanner");
 		return -1;
 	}
 
