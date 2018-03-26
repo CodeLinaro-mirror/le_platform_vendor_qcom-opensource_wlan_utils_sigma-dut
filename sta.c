@@ -2231,7 +2231,8 @@ static int cmd_sta_set_wmm(struct sigma_dut *dut, struct sigma_conn *conn,
 			fixed_int = 0;
 		}
 
-		sba_fv = atof(sba);
+		if (NULL != sba)
+			sba_fv = atof(sba);
 
 		dut->dialog_token++;
 		handle = 7000 + dut->dialog_token;
@@ -6293,6 +6294,12 @@ static int cmd_sta_send_frame_hs2_neighsolreq(struct sigma_dut *dut,
 	char buf[200];
 	const char *ip = get_param(cmd, "SenderIP");
 
+	if (NULL == ip) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Cannot find ip");
+		return 0;
+	}
+
 	snprintf(buf, sizeof(buf), "ndisc6 -nm %s %s -r 4", ip, intf);
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
 	if (system(buf) == 0) {
@@ -6335,7 +6342,7 @@ static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
 					      const char *ifname)
 {
 	char buf[200];
-	char ip[16];
+	char ip[16] = {0};
 	int s;
 
 	s = socket(PF_INET, SOCK_DGRAM, 0);
@@ -6383,6 +6390,7 @@ static int cmd_sta_send_frame_hs2_arpreply(struct sigma_dut *dut,
 	const char *val;
 	struct sockaddr_in taddr;
 
+	memset(&taddr, 0, sizeof(taddr));
 	val = get_param(cmd, "dest");
 	if (val)
 		hwaddr_aton(val, (unsigned char *) dst);
