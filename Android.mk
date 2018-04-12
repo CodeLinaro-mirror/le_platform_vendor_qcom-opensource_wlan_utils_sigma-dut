@@ -13,6 +13,8 @@ OBJS += ap.c
 OBJS += powerswitch.c
 OBJS += atheros.c
 OBJS += ftm.c
+OBJS += dpp.c
+OBJS += dhcp.c
 
 # Initialize CFLAGS to limit to local module
 CFLAGS =
@@ -27,8 +29,18 @@ CFLAGS += -DCONFIG_WLANTEST
 OBJS += wlantest.c
 endif
 
+### MIRACAST ###
+OBJS += miracast.c
+CFLAGS += -DMIRACAST
+dhcpver = $(filter N%,$(PLATFORM_VERSION))
+dhcpver += $(filter 7.%,$(PLATFORM_VERSION))
+ifeq (,$(strip $(dhcpver)))
+ CFLAGS += -DMIRACAST_DHCP_M
+endif
 CFLAGS += -DCONFIG_CTRL_IFACE_CLIENT_DIR=\"/data/misc/wifi/sockets\"
 CFLAGS += -DSIGMA_TMPDIR=\"/data\"
+
+CFLAGS += -DNL80211_SUPPORT
 
 LOCAL_PATH := $(call my-dir)
 FRAMEWORK_GIT_VER := $(shell cd $(ANDROID_BUILD_TOP/)frameworks/base && git describe)
@@ -53,9 +65,20 @@ LOCAL_MODULE := sigma_dut
 LOCAL_MODULE_TAGS := optional
 LOCAL_C_INCLUDES += \
 	$(LOCAL_PATH) frameworks/base/cmds/keystore system/security/keystore \
+	$(LOCAL_PATH) frameworks/opt/net/wifi/libwifi_hal/include/ \
 	$(LOCAL_PATH) hardware/qcom/wlan/qcwcn/wifi_hal \
-	$(LOCAL_PATH) hardware/libhardware_legacy/include/hardware_legacy
-LOCAL_SHARED_LIBRARIES := libc libcutils
+	$(LOCAL_PATH) system/core/include/cutils \
+	$(LOCAL_PATH) hardware/libhardware_legacy/include/hardware_legacy \
+	$(LOCAL_PATH) external/libpcap \
+	$(TARGET_OUT_HEADERS)/common/inc \
+	$(LOCAL_PATH) external/libnl/include
+
+LOCAL_SHARED_LIBRARIES := libc libcutils libnl
+LOCAL_STATIC_LIBRARIES := libpcap
+ifneq (,$(strip $(dhcpver)))
+LOCAL_SHARED_LIBRARIES += libnetutils
+LOCAL_C_INCLUDES += $(LOCAL_PATH) system/core/include/netutils
+endif
 LOCAL_SHARED_LIBRARIES += libhardware_legacy
 ifeq ($(BOARD_WLAN_DEVICE),qcwcn)
 ifneq ($(wildcard hardware/qcom/wlan/qcwcn/wifi_hal/nan_cert.h),)
@@ -64,22 +87,10 @@ OBJS += nan.c
 CFLAGS += -DANDROID_NAN
 endif
 endif
-ver = $(filter 4.3%,$(PLATFORM_VERSION))
-ver += $(filter 4.4%,$(PLATFORM_VERSION))
-ver += $(filter 5.0%,$(PLATFORM_VERSION))
-ver += $(filter 5.1%,$(PLATFORM_VERSION))
-ver += $(filter L%,$(PLATFORM_VERSION))
-ver += $(filter M%,$(PLATFORM_VERSION))
-ver += $(filter 6.0%,$(PLATFORM_VERSION))
-ver += $(filter N%,$(PLATFORM_VERSION))
-ver += $(filter 7.%,$(PLATFORM_VERSION))
-ifneq (,$(strip $(ver)))
-CFLAGS += -DANDROID43
 CFLAGS += -Wno-unused-parameter
 LOCAL_C_INCLUDES += system/security/keystore/include/keystore
 LOCAL_SHARED_LIBRARIES += liblog
 LOCAL_SHARED_LIBRARIES += libkeystore_binder
-endif
 LOCAL_SRC_FILES := $(OBJS)
 LOCAL_CFLAGS := $(CFLAGS)
 include $(BUILD_EXECUTABLE)
