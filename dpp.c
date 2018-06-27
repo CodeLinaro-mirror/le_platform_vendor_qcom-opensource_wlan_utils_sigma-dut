@@ -783,6 +783,71 @@ static int dpp_display_own_qrcode(struct sigma_dut *dut)
 }
 
 
+static int dpp_process_auth_response(struct sigma_dut *dut,
+				     struct sigma_conn *conn,
+				     struct wpa_ctrl *ctrl,
+				     const char **auth_events,
+				     const char *action_type,
+				     int check_mutual, char *buf, size_t buflen)
+{
+	int res;
+
+	res = get_wpa_cli_events(dut, ctrl, auth_events, buf, buflen);
+	if (res < 0) {
+		send_resp(dut, conn, SIGMA_COMPLETE,
+			  "BootstrapResult,OK,AuthResult,Timeout");
+		return res;
+	}
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "DPP auth result: %s", buf);
+
+	if (strstr(buf, "DPP-RESPONSE-PENDING")) {
+		/* Display own QR code in manual mode */
+		if (action_type && strcasecmp(action_type, "ManualDPP") == 0 &&
+		    dpp_display_own_qrcode(dut) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to display own QR code");
+			return -1;
+		}
+
+		/* Wait for the actual result after the peer has scanned the
+		 * QR Code. */
+		res = get_wpa_cli_events(dut, ctrl, auth_events,
+					 buf, buflen);
+		if (res < 0) {
+			send_resp(dut, conn, SIGMA_COMPLETE,
+				  "BootstrapResult,OK,AuthResult,Timeout");
+			return res;
+		}
+
+		sigma_dut_print(dut, DUT_MSG_DEBUG, "DPP auth result: %s", buf);
+	}
+
+	if (check_mutual) {
+		if (strstr(buf, "DPP-NOT-COMPATIBLE")) {
+			send_resp(dut, conn, SIGMA_COMPLETE,
+				  "BootstrapResult,OK,AuthResult,ROLES_NOT_COMPATIBLE");
+			return -1;
+		}
+
+		if (!strstr(buf, "DPP-AUTH-DIRECTION")) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,No event for auth direction seen");
+			return -1;
+		}
+
+		sigma_dut_print(dut, DUT_MSG_DEBUG, "DPP auth direction: %s",
+				buf);
+		if (strstr(buf, "mutual=1") == NULL) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Peer did not use mutual authentication");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+
 static int dpp_automatic_dpp(struct sigma_dut *dut,
 			     struct sigma_conn *conn,
 			     struct sigma_cmd *cmd)
@@ -835,6 +900,7 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	int check_mutual = 0;
 	int enrollee_ap;
 	int force_gas_fragm = 0;
+	int not_dpp_akm = 0;
 
 	if (!wait_conn)
 		wait_conn = "no";
@@ -1172,7 +1238,8 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 			snprintf(buf, sizeof(buf), "DPP_QR_CODE %s",
 				 dut->dpp_peer_uri);
 			if (wpa_command_resp(ifname, buf, buf,
-					     sizeof(buf)) < 0) {
+					     sizeof(buf)) < 0 ||
+			    strncmp(buf, "FAIL", 4) == 0) {
 				send_resp(dut, conn, SIGMA_ERROR,
 					  "errorCode,Failed to parse URI");
 				goto out;
@@ -1349,6 +1416,12 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 			}
 			sigma_dut_print(dut, DUT_MSG_DEBUG,
 					"DPP auth result: %s", buf);
+			if (strstr(buf, "DPP-NOT-COMPATIBLE")) {
+			    send_resp(dut, conn, SIGMA_COMPLETE,
+				      "BootstrapResult,OK,AuthResult,ROLES_NOT_COMPATIBLE");
+			    goto out;
+			}
+
 			if (strstr(buf, "DPP-SCAN-PEER-QR-CODE") == NULL) {
 				send_resp(dut, conn, SIGMA_ERROR,
 					  "errorCode,No scan request for peer QR Code seen");
@@ -1415,10 +1488,33 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 		}
 
 		if (strcasecmp(frametype, "AuthenticationConfirm") == 0) {
-			if (dpp_wait_rx(dut, ctrl, 2, -1) < 0)
-				result = "BootstrapResult,OK,AuthResult,Timeout";
-			else
-				result = "BootstrapResult,OK,AuthResult,Errorsent";
+			if (strcasecmp(auth_role, "Initiator") == 0) {
+				/* This special case of DPPStep,Timeout with
+				 * DPPFrameType,AuthenticationConfirm on an
+				 * Initiator is used to cover need for stopping
+				 * the Initiator/Enrollee from sending out
+				 * Configuration Request message. */
+				if (strcasecmp(prov_role, "Enrollee") != 0) {
+					send_resp(dut, conn, SIGMA_ERROR,
+						  "errorCode,Unexpected use of timeout after AuthenticationConfirm TX in Configurator role");
+					goto out;
+				}
+				if (check_mutual &&
+				    dpp_process_auth_response(
+					    dut, conn, ctrl, auth_events,
+					    action_type, check_mutual,
+					    buf, sizeof(buf)) < 0)
+					goto out;
+				if (dpp_wait_tx_status(dut, ctrl, 2) < 0)
+					result = "BootstrapResult,OK,AuthResult,Timeout";
+				else
+					result = "BootstrapResult,OK,AuthResult,Errorsent,LastFrameReceived,AuthenticationResponse";
+			} else {
+				if (dpp_wait_rx(dut, ctrl, 2, -1) < 0)
+					result = "BootstrapResult,OK,AuthResult,Timeout";
+				else
+					result = "BootstrapResult,OK,AuthResult,Errorsent,LastFrameReceived,AuthenticationConfirm";
+			}
 		}
 
 		if (strcasecmp(frametype, "ConfigurationRequest") == 0) {
@@ -1496,6 +1592,10 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 
 		if (dpp_wait_rx(dut, ctrl, 1, 5) < 0)
 			result = "BootstrapResult,OK,AuthResult,Errorsent,LastFrameReceived,None";
+		else if	(get_wpa_cli_events(dut, ctrl, auth_events,
+					    buf, sizeof(buf)) >= 0 &&
+			 strstr(buf, "DPP-RESPONSE-PENDING") != NULL)
+			result = "BootstrapResult,OK,AuthResult,Errorsent,LastFrameReceived,AuthenticationResponseWithStatusPending";
 		else
 			result = "BootstrapResult,OK,AuthResult,Errorsent,LastFrameReceived,AuthenticationResponse";
 		send_resp(dut, conn, SIGMA_COMPLETE, result);
@@ -1517,57 +1617,9 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 		goto out;
 	}
 
-	res = get_wpa_cli_events(dut, ctrl, auth_events, buf, sizeof(buf));
-	if (res < 0) {
-		send_resp(dut, conn, SIGMA_COMPLETE,
-			  "BootstrapResult,OK,AuthResult,Timeout");
+	if (dpp_process_auth_response(dut, conn, ctrl, auth_events, action_type,
+				      check_mutual, buf, sizeof(buf)) < 0)
 		goto out;
-	}
-	sigma_dut_print(dut, DUT_MSG_DEBUG, "DPP auth result: %s", buf);
-
-	if (strstr(buf, "DPP-RESPONSE-PENDING")) {
-		/* Display own QR code in manual mode */
-		if (action_type && strcasecmp(action_type, "ManualDPP") == 0 &&
-		    dpp_display_own_qrcode(dut) < 0) {
-			send_resp(dut, conn, SIGMA_ERROR,
-				  "errorCode,Failed to display own QR code");
-			goto out;
-		}
-
-		/* Wait for the actual result after the peer has scanned the
-		 * QR Code. */
-		res = get_wpa_cli_events(dut, ctrl, auth_events,
-					 buf, sizeof(buf));
-		if (res < 0) {
-			send_resp(dut, conn, SIGMA_COMPLETE,
-				  "BootstrapResult,OK,AuthResult,Timeout");
-			goto out;
-		}
-
-		sigma_dut_print(dut, DUT_MSG_DEBUG, "DPP auth result: %s", buf);
-	}
-
-	if (check_mutual) {
-		if (strstr(buf, "DPP-NOT-COMPATIBLE")) {
-			send_resp(dut, conn, SIGMA_COMPLETE,
-				  "BootstrapResult,OK,AuthResult,ROLES_NOT_COMPATIBLE");
-			goto out;
-		}
-
-		if (!strstr(buf, "DPP-AUTH-DIRECTION")) {
-			send_resp(dut, conn, SIGMA_ERROR,
-				  "errorCode,No event for auth direction seen");
-			goto out;
-		}
-
-		sigma_dut_print(dut, DUT_MSG_DEBUG, "DPP auth direction: %s",
-				buf);
-		if (strstr(buf, "mutual=1") == NULL) {
-			send_resp(dut, conn, SIGMA_ERROR,
-				  "errorCode,Peer did not use mutual authentication");
-			goto out;
-		}
-	}
 
 	if (frametype && strcasecmp(frametype, "AuthenticationConfirm") == 0) {
 		if (dpp_wait_tx_status(dut, ctrl, 2) < 0) {
@@ -1625,7 +1677,7 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 		if (res < 0)
 			result = "BootstrapResult,OK,AuthResult,OK,ConfResult,Timeout";
 		else
-			result = "BootstrapResult,OK,AuthResult,OK,ConfResult,Errorsent";
+			result = "BootstrapResult,OK,AuthResult,OK,ConfResult,Errorsent,LastFrameReceived,ConfigurationRequest";
 		send_resp(dut, conn, SIGMA_COMPLETE, result);
 		goto out;
 	}
@@ -1660,6 +1712,34 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	if (strcasecmp(wait_conn, "Yes") == 0 &&
 	    !sigma_dut_is_ap(dut) &&
 	    strcasecmp(prov_role, "Enrollee") == 0) {
+		int netw_id;
+		char *pos;
+
+		res = get_wpa_cli_event(dut, ctrl, "DPP-NETWORK-ID",
+					buf, sizeof(buf));
+		if (res < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,No DPP-NETWORK-ID");
+			goto out;
+		}
+		pos = strchr(buf, ' ');
+		if (!pos) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Invalid DPP-NETWORK-ID");
+			goto out;
+		}
+		pos++;
+		netw_id = atoi(pos);
+		snprintf(buf, sizeof(buf), "GET_NETWORK %d key_mgmt", netw_id);
+		if (wpa_command_resp(ifname, buf, buf, sizeof(buf)) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Could not fetch provisioned key_mgmt");
+			goto out;
+		}
+		if (strncmp(buf, "SAE", 3) == 0) {
+			/* SAE generates PMKSA-CACHE-ADDED event */
+			not_dpp_akm = 1;
+		}
 	wait_connect:
 		if (frametype && strcasecmp(frametype,
 					    "PeerDiscoveryRequest") == 0) {
@@ -1686,6 +1766,8 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 						 buf, sizeof(buf));
 			if (res < 0) {
 				send_resp(dut, conn, SIGMA_COMPLETE,
+					  not_dpp_akm ?
+					  "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkConnectResult,Timeout" :
 					  "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkIntroResult,OK,NetworkConnectResult,Timeout");
 				goto out;
 			}
@@ -1693,9 +1775,13 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 					"DPP connect result: %s", buf);
 			if (strstr(buf, "CTRL-EVENT-CONNECTED"))
 				send_resp(dut, conn, SIGMA_COMPLETE,
+					  not_dpp_akm ?
+					  "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkConnectResult,OK" :
 					  "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkIntroResult,OK,NetworkConnectResult,OK");
 			else
 				send_resp(dut, conn, SIGMA_COMPLETE,
+					  not_dpp_akm ?
+					  "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkConnectResult,Timeout" :
 					  "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkIntroResult,OK,NetworkConnectResult,Timeout");
 			goto out;
 		}
@@ -1730,6 +1816,7 @@ static int dpp_manual_dpp(struct sigma_dut *dut,
 			  struct sigma_cmd *cmd)
 {
 	const char *auth_role = get_param(cmd, "DPPAuthRole");
+	const char *self_conf = get_param(cmd, "DPPSelfConfigure");
 	int res = -1, success;
 	const char *val;
 	unsigned int old_timeout;
@@ -1739,6 +1826,9 @@ static int dpp_manual_dpp(struct sigma_dut *dut,
 			  "errorCode,Missing DPPAuthRole");
 		return 0;
 	}
+
+	if (!self_conf)
+		self_conf = "no";
 
 	old_timeout = dut->default_timeout;
 	val = get_param(cmd, "DPPTimeout");
@@ -1762,12 +1852,14 @@ static int dpp_manual_dpp(struct sigma_dut *dut,
 	}
 
 	if (strcasecmp(auth_role, "Initiator") == 0) {
-		res = dpp_scan_peer_qrcode(dut);
-		if (res < 0) {
-			send_resp(dut, conn, SIGMA_ERROR,
-				  "errorCode,Failed to scan peer QR Code");
-			res = 0;
-			goto out;
+		if (strcasecmp(self_conf, "Yes") != 0) {
+			res = dpp_scan_peer_qrcode(dut);
+			if (res < 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					"errorCode,Failed to scan peer QR Code");
+				res = 0;
+				goto out;
+			}
 		}
 
 		res = dpp_automatic_dpp(dut, conn, cmd);
