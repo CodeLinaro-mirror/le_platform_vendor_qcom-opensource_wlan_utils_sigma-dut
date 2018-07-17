@@ -402,6 +402,7 @@ struct sigma_dut {
 		AP_WPA2_PSK_SAE,
 		AP_SUITEB,
 		AP_WPA2_OWE,
+		AP_WPA2_EAP_OSEN,
 	} ap_key_mgmt;
 	enum ap_tag_key_mgmt {
 		AP2_OPEN,
@@ -485,6 +486,12 @@ struct sigma_dut {
 	char ap_osu_ssid[33];
 	int ap_osu_method[10];
 	int ap_osu_icon_tag;
+	int ap_venue_url;
+	int ap_advice_of_charge;
+	int ap_oper_icon_metadata;
+	int ap_tnc_file_name;
+	unsigned int ap_tnc_time_stamp;
+	char *ap_tnc_url;
 
 	int ap_fake_pkhash;
 	int ap_disable_protection;
@@ -576,6 +583,14 @@ struct sigma_dut {
 	enum value_not_set_enabled_disabled ap_broadcast_ssid;
 	enum value_not_set_enabled_disabled ap_rnr;
 	enum value_not_set_enabled_disabled ap_esp;
+
+	enum ppdu {
+		PPDU_NOT_SET,
+		PPDU_MU,
+		PPDU_SU,
+		PPDU_ER,
+		PPDU_TB,
+	} ap_he_ppdu;
 
 	const char *hostapd_debug_log;
 
@@ -722,6 +737,8 @@ struct sigma_dut {
 	struct nl80211_ctx *nl_ctx;
 	int config_rsnie;
 #endif /* NL80211_SUPPORT */
+
+	int sta_nss;
 };
 
 
