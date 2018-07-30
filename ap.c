@@ -1397,6 +1397,17 @@ static int cmd_ap_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (val)
 		dut->ap_blestacnt = atoi(val);
 
+	val = get_param(cmd, "PPDUTxType");
+	if (val) {
+		if (strcasecmp(val, "MU") == 0) {
+			dut->ap_he_ppdu = PPDU_MU;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported PPDUTxType");
+			return 0;
+		}
+	}
+
 	return 1;
 }
 
@@ -1685,6 +1696,10 @@ static int cmd_ap_set_security(struct sigma_dut *dut, struct sigma_conn *conn,
 			dut->ap_key_mgmt = AP_WPA2_OWE;
 			dut->ap_cipher = AP_CCMP;
 			dut->ap_pmf = AP_PMF_REQUIRED;
+		} else if (strcasecmp(val, "WPA2-ENT-OSEN") == 0) {
+			dut->ap_key_mgmt = AP_WPA2_EAP_OSEN;
+			dut->ap_cipher = AP_CCMP;
+			dut->ap_pmf = AP_PMF_OPTIONAL;
 		} else if (strcasecmp(val, "NONE") == 0) {
 			dut->ap_key_mgmt = AP_OPEN;
 			dut->ap_cipher = AP_PLAIN;
@@ -3084,6 +3099,9 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 				 dut->ap_radius_password);
 			owrt_ap_set_vap(dut, vap_count, "auth_secret", buf);
 			break;
+		case AP_WPA2_EAP_OSEN:
+			/* TODO */
+			break;
 		case AP_SUITEB:
 			owrt_ap_set_vap(dut, vap_count, "suite_b", "192");
 			snprintf(buf, sizeof(buf), "gcmp");
@@ -3975,6 +3993,7 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 	case AP_WPA_EAP:
 	case AP_SUITEB:
 	case AP_WPA2_OWE:
+	case AP_WPA2_EAP_OSEN:
 		/* Not supported */
 		break;
 	}
@@ -5792,6 +5811,21 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		run_system(dut, buf);
 		dut->hostapd_running = 1;
 	}
+
+	if (dut->ap_he_ppdu == PPDU_MU) {
+		run_system_wrapper(
+			dut, "wifitool %s setUnitTestCmd 0x47 2 11 1000000",
+			ifname);
+		run_system_wrapper(
+			dut, "wifitool %s setUnitTestCmd 0x47 2 17 1000000",
+			ifname);
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x47 2 8 0",
+				   ifname);
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x47 2 29 0",
+				   ifname);
+	}
 }
 
 
@@ -5887,6 +5921,10 @@ static int cmd_ath_ap_config_commit(struct sigma_dut *dut,
 			 dut->ap_radius_password);
 		run_system(dut, buf);
 		break;
+	case AP_WPA2_EAP_OSEN:
+		/* TODO */
+		sigma_dut_print(dut, DUT_MSG_ERROR, "EAP+OSEN not supported");
+		break;
 	case AP_SUITEB:
 		/* TODO */
 		sigma_dut_print(dut, DUT_MSG_ERROR, "SuiteB not supported");
@@ -5977,6 +6015,11 @@ static int cmd_ath_ap_config_commit(struct sigma_dut *dut,
 			snprintf(buf, sizeof(buf), "cfg -a AP_AUTH_SECRET_2=%s",
 				 dut->ap_radius_password);
 			run_system(dut, buf);
+			break;
+		case AP_WPA2_EAP_OSEN:
+			/* TODO */
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"EAP+OSEN not supported");
 			break;
 		case AP_SUITEB:
 			/* TODO */
@@ -6389,6 +6432,9 @@ int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	char path[100];
 	enum driver_type drv;
 	const char *key_mgmt;
+#ifdef ANDROID
+	struct group *gr;
+#endif /* ANDROID */
 
 	drv = get_driver_type();
 
@@ -6607,8 +6653,10 @@ int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 	case AP_WPA2_EAP:
 	case AP_WPA2_EAP_MIXED:
 	case AP_WPA_EAP:
+	case AP_WPA2_EAP_OSEN:
 		fprintf(f, "ieee8021x=1\n");
-		if (dut->ap_key_mgmt == AP_WPA2_EAP)
+		if (dut->ap_key_mgmt == AP_WPA2_EAP ||
+		    dut->ap_key_mgmt == AP_WPA2_EAP_OSEN)
 			fprintf(f, "wpa=2\n");
 		else if (dut->ap_key_mgmt == AP_WPA2_EAP_MIXED)
 			fprintf(f, "wpa=3\n");
@@ -6620,11 +6668,15 @@ int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut->ap_add_sha256 ? " WPA-EAP-SHA256" : "");
 			break;
 		case AP_PMF_OPTIONAL:
-			fprintf(f, "wpa_key_mgmt=WPA-EAP%s\n",
-				dut->ap_add_sha256 ? " WPA-EAP-SHA256" : "");
+			fprintf(f, "wpa_key_mgmt=WPA-EAP%s%s\n",
+				dut->ap_add_sha256 ? " WPA-EAP-SHA256" : "",
+				dut->ap_key_mgmt == AP_WPA2_EAP_OSEN ? " OSEN" :
+				"");
 			break;
 		case AP_PMF_REQUIRED:
-			fprintf(f, "wpa_key_mgmt=WPA-EAP-SHA256\n");
+			fprintf(f, "wpa_key_mgmt=WPA-EAP-SHA256%s\n",
+				dut->ap_key_mgmt == AP_WPA2_EAP_OSEN ? " OSEN" :
+				"");
 			break;
 		}
 		fprintf(f, "wpa_pairwise=%s\n",
@@ -6790,7 +6842,7 @@ int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 			bssid[0] |= 0x02;
 
 		snprintf(ifname2, sizeof(ifname2), "%s_1", ifname);
-		fprintf(f, "bss=%s_1\n", ifname2);
+		fprintf(f, "bss=%s\n", ifname2);
 		fprintf(f, "ssid=%s\n", dut->ap_tag_ssid[0]);
 		if (dut->bridge)
 			fprintf(f, "bridge=%s\n", dut->bridge);
@@ -6800,6 +6852,8 @@ int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 
 		if (dut->ap_tag_key_mgmt[0] == AP2_OSEN) {
 			fprintf(f, "osen=1\n");
+			/* Disable DGAF for OSEN BSS */
+			fprintf(f, "disable_dgaf=1\n");
 			if (strlen(dut->ap2_radius_ipaddr))
 				fprintf(f, "auth_server_addr=%s\n",
 					dut->ap2_radius_ipaddr);
@@ -7033,8 +7087,9 @@ int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"Error changing permissions");
 
-	if (chown(SIGMA_TMPDIR "/sigma_dut-ap.conf", -1,
-		  getgrnam("wifi")->gr_gid) < 0)
+	gr = getgrnam("wifi");
+	if (!gr ||
+	    chown(SIGMA_TMPDIR "/sigma_dut-ap.conf", -1, gr->gr_gid) < 0)
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Error changing groupid");
 #endif /* ANDROID */
 
@@ -7670,6 +7725,8 @@ static int cmd_ap_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 		dut->ap_pmksa_caching = 0;
 		dut->ap_80plus80 = 0;
 	}
+
+	dut->ap_he_ppdu = PPDU_NOT_SET;
 
 	dut->ap_oper_chn = 0;
 
