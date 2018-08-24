@@ -2178,7 +2178,7 @@ static int cmd_sta_set_wmm(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *sba = get_param(cmd, "Sba");
 	int direction;
 	int handle;
-	float sba_fv;
+	float sba_fv = 0;
 	int fixed_int;
 	int psb_ts;
 
@@ -2231,7 +2231,9 @@ static int cmd_sta_set_wmm(struct sigma_dut *dut, struct sigma_conn *conn,
 			fixed_int = 0;
 		}
 
-		sba_fv = atof(sba);
+		if (NULL != sba) {
+			sba_fv = atof(sba);
+		}
 
 		dut->dialog_token++;
 		handle = 7000 + dut->dialog_token;
@@ -6288,6 +6290,11 @@ static int cmd_sta_send_frame_hs2_neighsolreq(struct sigma_dut *dut,
 	char buf[200];
 	const char *ip = get_param(cmd, "SenderIP");
 
+	if (ip == NULL) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,Missing SenderIP parameter");
+		return 0;
+	}
 	snprintf(buf, sizeof(buf), "ndisc6 -nm %s %s -r 4", ip, intf);
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
 	if (system(buf) == 0) {
@@ -6330,7 +6337,7 @@ static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
 					      const char *ifname)
 {
 	char buf[200];
-	char ip[16];
+	char ip[16] = {0};
 	int s;
 
 	s = socket(PF_INET, SOCK_DGRAM, 0);
@@ -6378,6 +6385,7 @@ static int cmd_sta_send_frame_hs2_arpreply(struct sigma_dut *dut,
 	const char *val;
 	struct sockaddr_in taddr;
 
+	memset(&taddr, 0, sizeof(taddr));
 	val = get_param(cmd, "dest");
 	if (val)
 		hwaddr_aton(val, (unsigned char *) dst);

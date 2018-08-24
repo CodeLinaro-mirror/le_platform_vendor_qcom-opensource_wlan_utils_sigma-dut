@@ -392,7 +392,7 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	const char *conf_role;
 	int mutual;
 	int conf_index = -1;
-	char buf[2000];
+	char buf[2000] = {0};
 	char conf_ssid[100];
 	char conf_pass[100];
 	char pkex_identifier[200];
@@ -550,6 +550,10 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 		else
 			conf_role = "sta-psk";
 		break;
+	default:
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Invalid DPPConfIndex");
+		goto out;
 	}
 
 	if (strcasecmp(auth_role, "Initiator") == 0) {
