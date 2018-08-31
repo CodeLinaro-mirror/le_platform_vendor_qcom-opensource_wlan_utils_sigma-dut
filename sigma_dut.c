@@ -2,6 +2,7 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
+ * Copyright (c) 2018, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -29,6 +30,7 @@ char *sigma_p2p_ifname = NULL;
 static char *sigma_p2p_ifname_buf = NULL;
 char *sigma_wpas_ctrl = "/var/run/wpa_supplicant/";
 char *sigma_hapd_ctrl = NULL;
+char *client_socket_path = NULL;
 char *ap_inet_addr = "192.168.43.1";
 char *ap_inet_mask = "255.255.255.0";
 char *sigma_cert_path = "/etc/wpa_supplicant";
@@ -704,7 +706,8 @@ static const char * const license1 =
 "----------------------------\n"
 "\n"
 "Copyright (c) 2010-2011, Atheros Communications, Inc.\n"
-"Copyright (c) 2011-2015, Qualcomm Atheros, Inc.\n"
+"Copyright (c) 2011-2017, Qualcomm Atheros, Inc.\n"
+"Copyright (c) 2018, The Linux Foundation\n"
 "All Rights Reserved.\n"
 "Licensed under the Clear BSD license.\n"
 "\n";
@@ -765,11 +768,13 @@ int main(int argc, char *argv[])
 	sigma_dut.default_timeout = 120;
 	sigma_dut.dialog_token = 0;
 	sigma_dut.dpp_conf_id = -1;
+	sigma_dut.dpp_local_bootstrap = -1;
+	sigma_dut.sta_nss = 2; /* Make default nss 2 */
 	set_defaults(&sigma_dut);
 
 	for (;;) {
 		c = getopt(argc, argv,
-			   "aAb:Bc:C:dDE:e:fF:gGhH:j:i:Ik:l:L:m:M:nN:o:O:p:P:qr:R:s:S:tT:uv:VWw:x:y:");
+			   "aAb:Bc:C:dDE:e:fF:gGhH:j:i:Ik:l:L:m:M:nN:o:O:p:P:qr:R:s:S:tT:uv:VWw:x:y:z:");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -950,6 +955,9 @@ int main(int argc, char *argv[])
 			sigma_dut.miracast_lib_path = optarg;
 			break;
 #endif /* MIRACAST */
+		case 'z':
+			client_socket_path = optarg;
+			break;
 		case 'h':
 		default:
 			printf("usage: sigma_dut [-aABdfGqDIntuVW] [-p<port>] "
@@ -979,6 +987,8 @@ int main(int argc, char *argv[])
 			       "       [-x <sink|source>] \\\n"
 			       "       [-y <Miracast library path>] \\\n"
 #endif /* MIRACAST */
+			       "       [-z <client socket directory path \\\n"
+			       "       Ex: </data/vendor/wifi/sockets>] \\\n"
 			       "       [-r <HT40 or 2.4_HT40>]\n");
 			printf("local command: sigma_dut [-p<port>] "
 			       "<-l<cmd>>\n");
@@ -1001,6 +1011,9 @@ int main(int argc, char *argv[])
 				"Interface should be provided for QNX/LINUX-WCN driver - check option M and S");
 	}
 
+#ifdef NL80211_SUPPORT
+	sigma_dut.nl_ctx = nl80211_init(&sigma_dut);
+#endif /* NL80211_SUPPORT */
 	sigma_dut_register_cmds();
 
 #ifdef __QNXNTO__
@@ -1071,7 +1084,14 @@ int main(int argc, char *argv[])
 	sigma_dut.btm_query_cand_list = NULL;
 	free(sigma_dut.rsne_override);
 	free(sigma_dut.ap_sae_groups);
+	free(sigma_dut.dpp_peer_uri);
+#ifdef NL80211_SUPPORT
+	nl80211_deinit(&sigma_dut, sigma_dut.nl_ctx);
+#endif /* NL80211_SUPPORT */
 	sigma_dut_unreg_cmds(&sigma_dut);
+#ifdef ANDROID
+	hlp_thread_cleanup(&sigma_dut);
+#endif /* ANDROID */
 
 	return 0;
 }
