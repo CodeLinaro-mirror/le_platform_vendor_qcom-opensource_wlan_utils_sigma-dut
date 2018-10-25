@@ -2430,8 +2430,8 @@ static int owrt_ap_config_vap_hs2(struct sigma_dut *dut, int vap_id)
 			break;
 		case 3:
 		case 103:
-			osu_friendly_name = "spa:SP Red Test Only";
-			osu_service_desc = "spa:Free service for test purpose";
+			osu_friendly_name = "'spa:SP Red Test Only'";
+			osu_service_desc = "'spa:Free service for test purpose'";
 			break;
 		case 4:
 		case 104:
@@ -2448,7 +2448,7 @@ static int owrt_ap_config_vap_hs2(struct sigma_dut *dut, int vap_id)
 				 hs20_icon_filename);
 			owrt_ap_set_list_vap(dut, vap_id, "hs20_icon",
 					     hs20_icon);
-			osu_friendly_name = "'kor:SP 파랑 테스트 전용'";
+			osu_friendly_name = "'kor:SP 오렌지 테스트 전용'";
 
 			hs20_icon_filename = "icon_orange_zxx.png";
 			if (dut->ap_osu_icon_tag == 2)
@@ -2465,7 +2465,7 @@ static int owrt_ap_config_vap_hs2(struct sigma_dut *dut, int vap_id)
 					     "'eng:SP Orange Test Only'");
 			owrt_ap_set_list_vap(dut, vap_id, "osu_service_desc",
 					     "'eng:Free service for test purpose'");
-			osu_friendly_name = "'kor:SP 파랑 테스트 전용'";
+			osu_friendly_name = "'kor:SP 오렌지 테스트 전용'";
 
 			hs20_icon_filename = "icon_orange_zxx.png";
 			if (dut->ap_osu_icon_tag == 2)
@@ -2546,7 +2546,7 @@ static int owrt_ap_config_vap_hs2(struct sigma_dut *dut, int vap_id)
 
 			owrt_ap_set_list_vap(dut, vap_id, "osu_icon",
 					     "'icon_green_eng.png'");
-			osu_friendly_name = "'kor:SP 오렌지 테스트 전용'";
+			osu_friendly_name = "'kor:SP 초록 테스트 전용'";
 
 			hs20_icon_filename = "icon_green_zxx.png";
 			if (dut->ap_osu_icon_tag == 2)
@@ -2863,9 +2863,9 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 				if (dut->ap_sae_groups) {
 					snprintf(buf, sizeof(buf), "\'%s\'",
 						 dut->ap_sae_groups);
-					owrt_ap_set_vap(dut, vap_count +
-							(wlan_tag - 1),
-							"owe_groups", buf);
+					owrt_ap_set_list_vap(dut, vap_count +
+							     (wlan_tag - 1),
+							     "owe_groups", buf);
 				}
 			}
 		}
@@ -3164,8 +3164,8 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 			if (dut->ap_sae_groups) {
 				snprintf(buf, sizeof(buf), "\'%s\'",
 					 dut->ap_sae_groups);
-				owrt_ap_set_vap(dut, vap_count, "owe_groups",
-						buf);
+				owrt_ap_set_list_vap(dut, vap_count,
+						     "owe_groups", buf);
 			}
 
 			if (dut->ap_key_mgmt == AP_WPA2_OWE &&
@@ -3266,10 +3266,10 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 	}
 
 	if (dut->ap_net_auth_type == 1) {
-		owrt_ap_set_vap(dut, vap_id, "network_auth_type",
-				"'00https://tandc-server.wi-fi.org'");
+		owrt_ap_set_list_vap(dut, vap_id, "network_auth_type",
+				     "'00https://tandc-server.wi-fi.org'");
 	} else if (dut->ap_net_auth_type == 2) {
-		owrt_ap_set_vap(dut, vap_id, "network_auth_type", "'01'");
+		owrt_ap_set_list_vap(dut, vap_id, "network_auth_type", "'01'");
 	}
 
 	if (dut->ap_nai_realm_list == 1) {
@@ -3496,7 +3496,7 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 
 	if (dut->ap_sae_groups) {
 		snprintf(buf, sizeof(buf), "\'%s\'", dut->ap_sae_groups);
-		owrt_ap_set_vap(dut, vap_count, "sae_groups", buf);
+		owrt_ap_set_list_vap(dut, vap_count, "sae_groups", buf);
 	}
 
 	if (dut->sae_anti_clogging_threshold >= 0) {
