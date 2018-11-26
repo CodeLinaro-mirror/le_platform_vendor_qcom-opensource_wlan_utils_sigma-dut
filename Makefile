@@ -56,15 +56,21 @@ CFLAGS += -DCONFIG_SNIFFER
 OBJS += sniffer.o
 endif
 
-ifndef NO_SERVER
+ifdef SERVER
 CFLAGS += -DCONFIG_SERVER
 OBJS += server.o
+LIBS += -lsqlite3
 endif
 
 ifdef MIRACAST
 OBJS += miracast.o
 CFLAGS += -DMIRACAST -DMIRACAST_DHCP_M
 LIBS += -ldl
+endif
+
+ifdef NL80211_SUPPORT
+CFLAGS += -DNL80211_SUPPORT -I /usr/include/libnl3
+LIBS += -lnl-3 -lnl-genl-3
 endif
 
 sigma_dut: $(OBJS)
