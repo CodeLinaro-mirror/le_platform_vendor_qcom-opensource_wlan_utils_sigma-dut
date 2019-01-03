@@ -68,7 +68,7 @@ LIBS += -ldl
 endif
 
 sigma_dut: $(OBJS)
-	$(LDO) $(LDFLAGS) -o sigma_dut $(OBJS) $(LIBS)
+	$(LDO) $(CFLAGS) $(LDFLAGS) -o sigma_dut $(OBJS) $(LIBS)
 
 clean:
 	rm -f core *~ *.o *.d sigma_dut
