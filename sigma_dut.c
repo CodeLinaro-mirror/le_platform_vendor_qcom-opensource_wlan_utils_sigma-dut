@@ -71,6 +71,7 @@ void sigma_dut_print(struct sigma_dut *dut, int level, const char *fmt, ...)
 	if (level < dut->debug_level)
 		return;
 
+	gettimeofday(&tv, NULL);
 #ifdef ANDROID
 	va_start(ap, fmt);
 	__android_log_vprint(level_to_android_priority(level),
@@ -78,10 +79,18 @@ void sigma_dut_print(struct sigma_dut *dut, int level, const char *fmt, ...)
 	va_end(ap);
 	if (!dut->stdout_debug)
 		return;
+#else /* ANDROID */
+	if (dut->log_file_fd) {
+		va_start(ap, fmt);
+		fprintf(dut->log_file_fd, "%ld.%06u: ",
+			(long) tv.tv_sec, (unsigned int) tv.tv_usec);
+		vfprintf(dut->log_file_fd, fmt, ap);
+		fprintf(dut->log_file_fd, "\n");
+		va_end(ap);
+	}
 #endif /* ANDROID */
 
 	va_start(ap, fmt);
-	gettimeofday(&tv, NULL);
 	printf("%ld.%06u: ", (long) tv.tv_sec,
 	       (unsigned int) tv.tv_usec);
 	vprintf(fmt, ap);
@@ -427,6 +436,7 @@ static void process_cmd(struct sigma_dut *dut, struct sigma_conn *conn,
 		send_resp(dut, conn, SIGMA_INVALID, NULL);
 		break;
 	case STATUS_SENT:
+	case STATUS_SENT_ERROR:
 		break;
 	case SUCCESS_SEND_STATUS:
 		send_resp(dut, conn, SIGMA_COMPLETE, NULL);
@@ -734,6 +744,34 @@ static char * determine_sigma_p2p_ifname(void)
 }
 
 
+static int get_nl80211_config_enable_option(struct sigma_dut *dut)
+{
+	char cmd[100], result[5];
+	FILE *f;
+	size_t len;
+	int ap_nl80211_enable;
+
+	snprintf(cmd, sizeof(cmd), "uci get qcacfg80211.config.enable");
+	f = popen(cmd, "r");
+	if (!f)
+		return -1;
+
+	len = fread(result, 1, sizeof(result) - 1, f);
+	pclose(f);
+
+	if (len == 0)
+		return -1;
+
+	result[len] = '\0';
+	ap_nl80211_enable = atoi(result);
+
+	if (ap_nl80211_enable)
+		dut->priv_cmd = "cfg80211tool";
+
+	return 0;
+}
+
+
 static void set_defaults(struct sigma_dut *dut)
 {
 	dut->ap_p2p_cross_connect = -1;
@@ -742,6 +780,7 @@ static void set_defaults(struct sigma_dut *dut)
 	dut->default_11ng_ap_chwidth = AP_AUTO;
 	/* by default, enable writing of traffic stream stats */
 	dut->write_stats = 1;
+	dut->priv_cmd = "iwpriv";
 }
 
 
@@ -820,7 +859,7 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		c = getopt(argc, argv,
-			   "aAb:Bc:C:dDE:e:fF:gGhH:j:J:i:Ik:l:L:m:M:nN:o:O:p:P:qQr:R:s:S:tT:uv:VWw:x:y:z:");
+			   "aAb:Bc:C:dDE:e:fF:gGhH:j:J:i:Ik:K:l:L:m:M:nN:o:O:p:P:qQr:R:s:S:tT:uv:VWw:x:y:z:");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -953,6 +992,9 @@ int main(int argc, char *argv[])
 		case 'O':
 			sigma_dut.version_name = optarg;
 			break;
+		case 'K':
+			sigma_dut.log_file_dir = optarg;
+			break;
 		case 'S':
 			sigma_station_ifname = optarg;
 			break;
@@ -1034,6 +1076,7 @@ int main(int argc, char *argv[])
 			       "\\\n"
 			       "       [-i <IP address of the AP>] \\\n"
 			       "       [-k <subnet mask for the AP>] \\\n"
+			       "       [-K <sigma_dut log file directory>] \\\n"
 			       "       [-e <hostapd entropy file>] \\\n"
 			       "       [-N <device_get_info vendor>] \\\n"
 			       "       [-o <device_get_info model>] \\\n"
@@ -1065,6 +1108,9 @@ int main(int argc, char *argv[])
 		sigma_dut_print(&sigma_dut, DUT_MSG_ERROR,
 				"Interface should be provided for QNX/LINUX-WCN driver - check option M and S");
 	}
+
+	if (get_openwrt_driver_type() == OPENWRT_DRIVER_ATHEROS)
+		get_nl80211_config_enable_option(&sigma_dut);
 
 #ifdef NL80211_SUPPORT
 	sigma_dut.nl_ctx = nl80211_init(&sigma_dut);
@@ -1141,6 +1187,8 @@ int main(int argc, char *argv[])
 	free(sigma_dut.ap_sae_groups);
 	free(sigma_dut.dpp_peer_uri);
 	free(sigma_dut.ap_sae_passwords);
+	if (sigma_dut.log_file_fd)
+		fclose(sigma_dut.log_file_fd);
 #ifdef NL80211_SUPPORT
 	nl80211_deinit(&sigma_dut, sigma_dut.nl_ctx);
 #endif /* NL80211_SUPPORT */

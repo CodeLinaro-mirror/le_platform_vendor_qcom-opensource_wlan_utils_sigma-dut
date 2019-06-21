@@ -67,6 +67,10 @@
 #define ETH_P_ARP 0x0806
 #endif
 
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) (sizeof((x)) / (sizeof(((x)[0]))))
+#endif
+
 struct sigma_dut;
 
 #define MAX_PARAMS 100
@@ -78,6 +82,21 @@ struct sigma_dut;
 typedef unsigned int u32;
 typedef uint16_t u16;
 typedef unsigned char u8;
+
+struct ieee80211_hdr_3addr {
+	uint16_t frame_control;
+	uint16_t duration_id;
+	uint8_t addr1[ETH_ALEN];
+	uint8_t addr2[ETH_ALEN];
+	uint8_t addr3[ETH_ALEN];
+	uint16_t seq_ctrl;
+} __attribute__((packed));
+
+struct wfa_p2p_attribute {
+	uint8_t id;
+	uint16_t len;
+	uint8_t variable[0];
+} __attribute__((packed));
 
 #define WPA_GET_BE32(a) ((((u32) (a)[0]) << 24) | (((u32) (a)[1]) << 16) | \
 			 (((u32) (a)[2]) << 8) | ((u32) (a)[3]))
@@ -107,6 +126,7 @@ struct sigma_conn {
 };
 
 enum sigma_cmd_result {
+	STATUS_SENT_ERROR = -3,
 	ERROR_SEND_STATUS = -2,
 	INVALID_SEND_STATUS = -1,
 	STATUS_SENT = 0,
@@ -787,6 +807,8 @@ struct sigma_dut {
 	const char *vendor_name; /* device_get_info vendor override */
 	const char *model_name; /* device_get_info model override */
 	const char *version_name; /* device_get_info version override */
+	const char *log_file_dir; /* Directory to generate log file */
+	FILE *log_file_fd; /* Pointer to log file */
 
 	int ndp_enable; /* Flag which is set once the NDP is setup */
 
@@ -834,6 +856,11 @@ struct sigma_dut {
 #ifdef ANDROID
 	int nanservicediscoveryinprogress;
 #endif /* ANDROID */
+
+	const char *priv_cmd; /* iwpriv / cfg80211tool command name */
+
+	unsigned int wpa_log_size;
+	char dev_start_test_runtime_id[100];
 };
 
 
@@ -919,6 +946,7 @@ int ath6kl_client_uapsd(struct sigma_dut *dut, const char *intf, int uapsd);
 int is_ip_addr(const char *str);
 int run_system(struct sigma_dut *dut, const char *cmd);
 int run_system_wrapper(struct sigma_dut *dut, const char *cmd, ...);
+int run_iwpriv(struct sigma_dut *dut, const char *ifname, const char *cmd, ...);
 int cmd_wlantest_set_channel(struct sigma_dut *dut, struct sigma_conn *conn,
 			     struct sigma_cmd *cmd);
 void sniffer_close(struct sigma_dut *dut);
@@ -972,6 +1000,7 @@ void get_ver(const char *cmd, char *buf, size_t buflen);
 
 /* utils.c */
 enum sigma_program sigma_program_to_enum(const char *prog);
+int hex_byte(const char *str);
 int parse_hexstr(const char *hex, unsigned char *buf, size_t buflen);
 int parse_mac_address(struct sigma_dut *dut, const char *arg,
 		      unsigned char *addr);
