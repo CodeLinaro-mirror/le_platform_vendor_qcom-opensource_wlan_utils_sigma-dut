@@ -400,6 +400,8 @@ struct sigma_dut {
 		STA_PMF_REQUIRED
 	} sta_pmf;
 
+	int sta_ft_ds;
+
 	int no_tpk_expiration;
 
 	int er_oper_performed;
@@ -525,6 +527,7 @@ struct sigma_dut {
 	char *ap_sae_groups;
 	int sae_anti_clogging_threshold;
 	int sae_reflection;
+	int sae_confirm_immediate;
 	char ap_passphrase[101];
 	char ap_psk[65];
 	char *ap_sae_passwords;
@@ -634,6 +637,7 @@ struct sigma_dut {
 	char ap_mobility_domain[10];
 	unsigned char ap_cell_cap_pref;
 	int ap_ft_oa;
+	enum value_not_set_enabled_disabled ap_ft_ds;
 	int ap_name;
 	int ap_interface_5g;
 	int ap_interface_2g;
@@ -667,6 +671,8 @@ struct sigma_dut {
 
 	char *ar_ltf;
 
+	int ap_numsounddim;
+
 	enum value_not_set_enabled_disabled ap_oce;
 	enum value_not_set_enabled_disabled ap_filsdscv;
 	enum value_not_set_enabled_disabled ap_filshlp;
@@ -675,6 +681,9 @@ struct sigma_dut {
 	enum value_not_set_enabled_disabled ap_esp;
 
 	enum value_not_set_enabled_disabled ap_he_ulofdma;
+	enum value_not_set_enabled_disabled ap_he_dlofdma;
+	enum value_not_set_enabled_disabled ap_bcc;
+	enum value_not_set_enabled_disabled ap_he_frag;
 
 	enum ppdu {
 		PPDU_NOT_SET,
@@ -682,7 +691,14 @@ struct sigma_dut {
 		PPDU_SU,
 		PPDU_ER,
 		PPDU_TB,
+		PPDU_HESU,
 	} ap_he_ppdu;
+
+	enum bufsize {
+		BA_BUFSIZE_NOT_SET,
+		BA_BUFSIZE_64,
+		BA_BUFSIZE_256,
+	} ap_ba_bufsize;
 
 	struct sigma_ese_alloc ap_ese_allocs[MAX_ESE_ALLOCS];
 	int ap_num_ese_allocs;
@@ -724,6 +740,9 @@ struct sigma_dut {
 	} ap_wmmps;
 
 	enum sec_ch_offset ap_chwidth_offset;
+
+	char *ap_dpp_conf_addr;
+	char *ap_dpp_conf_pkhash;
 
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
@@ -847,6 +866,7 @@ struct sigma_dut {
 	char *rsne_override;
 	int sta_associate_wait_connect;
 	char server_cert_hash[65];
+	int server_cert_tod;
 	int sta_tod_policy;
 	const char *hostapd_bin;
 	int use_hostapd_pid_file;
@@ -983,7 +1003,7 @@ void ap_register_cmds(void);
 void ath_disable_txbf(struct sigma_dut *dut, const char *intf);
 void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 			   const char *val);
-void novap_reset(struct sigma_dut *dut, const char *ifname);
+void novap_reset(struct sigma_dut *dut, const char *ifname, int reset);
 int get_hwaddr(const char *ifname, unsigned char *hwaddr);
 enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 					   struct sigma_conn *conn,
@@ -1059,6 +1079,7 @@ void str_remove_chars(char *str, char ch);
 int get_wps_forced_version(struct sigma_dut *dut, const char *str);
 int base64_encode(const char *src, size_t len, char *out, size_t out_len);
 int random_get_bytes(char *buf, size_t len);
+int get_enable_disable(const char *val);
 
 /* uapsd_stream.c */
 void receive_uapsd(struct sigma_stream *s);
