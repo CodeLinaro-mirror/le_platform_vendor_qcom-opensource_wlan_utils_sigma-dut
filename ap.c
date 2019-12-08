@@ -1601,6 +1601,38 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		}
 	}
 
+	val = get_param(cmd, "NumSoundDim");
+	if (val)
+		dut->ap_numsounddim = atoi(val);
+
+	val = get_param(cmd, "BCC");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_bcc = VALUE_ENABLED;
+			dut->ap_ldpc = VALUE_DISABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_ldpc = VALUE_ENABLED;
+			dut->ap_bcc = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported BCC value");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "FrgmntSupport");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_he_frag = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_he_frag = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported FrgmntSupport value");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
 	return 1;
 }
 
@@ -6014,6 +6046,70 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		run_system_wrapper(dut, "wifitool %s setUnitTestCmd 0x4b 2 2 1",
 				   ifname);
 	}
+
+	if (dut->ap_numsounddim) {
+		unsigned int txchainmask = 0;
+
+		switch (dut->ap_numsounddim) {
+		case 1:
+			txchainmask = 0x01;
+			break;
+		case 2:
+			txchainmask = 0x03;
+			break;
+		case 3:
+			txchainmask = 0x07;
+			break;
+		case 4:
+			txchainmask = 0x0f;
+			break;
+		case 5:
+			txchainmask = 0x1f;
+			break;
+		case 6:
+			txchainmask = 0x3f;
+			break;
+		case 7:
+			txchainmask = 0x7f;
+			break;
+		case 8:
+			txchainmask = 0xff;
+			break;
+		}
+		run_iwpriv(dut, basedev, "txchainmask %d", txchainmask);
+	}
+
+	if (dut->ap_numsounddim && dut->device_type == AP_testbed) {
+		/* Sets g_force_1x1_peer to 1 which should be reset to zero
+		 * for non-MU test cases */
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x48 2 118 1",
+				   ifname);
+		if (dut->ap_mu_txBF) {
+			/* Disable DL OFDMA */
+			run_system_wrapper(dut,
+					   "wifitool %s setUnitTestCmd 0x47 2 11 0",
+					   ifname);
+		}
+	}
+
+	if (dut->ap_channel <= 11 && dut->program == PROGRAM_HE &&
+	    dut->device_type == AP_testbed) {
+		dut->ap_bcc = VALUE_ENABLED;
+		run_iwpriv(dut, ifname, "vht_11ng 0");
+	}
+
+	if (dut->ap_bcc == VALUE_ENABLED) {
+		run_iwpriv(dut, ifname, "mode 11AHE20");
+		run_iwpriv(dut, ifname, "nss 2");
+		run_iwpriv(dut, ifname, "he_txmcsmap 0x0");
+		run_iwpriv(dut, ifname, "he_rxmcsmap 0x0");
+	}
+
+	if (dut->ap_he_frag == VALUE_ENABLED)
+		run_iwpriv(dut, ifname, "he_frag 1");
+	else if (dut->ap_he_frag == VALUE_DISABLED)
+		run_iwpriv(dut, ifname, "he_frag 0");
 }
 
 
@@ -7650,10 +7746,23 @@ skip_key_mgmt:
 	}
 
 	if (drv == DRIVER_LINUX_WCN) {
-		sigma_dut_print(dut, DUT_MSG_INFO, "setting ip addr %s mask %s",
-				ap_inet_addr, ap_inet_mask);
+		const char *ifname_ptr = ifname;
+
+		if ((dut->ap_key_mgmt == AP_OPEN &&
+		     dut->ap_tag_key_mgmt[0] == AP2_WPA2_OWE) ||
+		    (dut->ap_key_mgmt == AP_WPA2_OWE &&
+		     dut->ap_tag_ssid[0][0] &&
+		     dut->ap_tag_key_mgmt[0] == AP2_OPEN)) {
+			/* OWE transition mode */
+			if (dut->bridge)
+				ifname_ptr = dut->bridge;
+		}
+
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"setting ip addr %s mask %s ifname %s",
+				ap_inet_addr, ap_inet_mask, ifname_ptr);
 		snprintf(buf, sizeof(buf), "ifconfig %s %s netmask %s up",
-			 ifname, ap_inet_addr, ap_inet_mask);
+			 ifname_ptr, ap_inet_addr, ap_inet_mask);
 		if (system(buf) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to initialize the interface");
@@ -8279,10 +8388,20 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 
 	dut->ap_he_ppdu = PPDU_NOT_SET;
 	dut->ap_he_ulofdma = VALUE_NOT_SET;
-	if (dut->device_type == AP_testbed)
+	dut->ap_numsounddim = 0;
+	dut->ap_bcc = VALUE_DISABLED;
+	if (dut->device_type == AP_testbed) {
 		dut->ap_he_dlofdma = VALUE_DISABLED;
-	else
+		dut->ap_he_frag = VALUE_DISABLED;
+	} else {
 		dut->ap_he_dlofdma = VALUE_NOT_SET;
+		dut->ap_he_frag = VALUE_NOT_SET;
+	}
+
+	if (dut->program == PROGRAM_HE) {
+		if (dut->device_type == AP_testbed)
+			dut->ap_ldpc = VALUE_DISABLED;
+	}
 
 	dut->ap_oper_chn = 0;
 
