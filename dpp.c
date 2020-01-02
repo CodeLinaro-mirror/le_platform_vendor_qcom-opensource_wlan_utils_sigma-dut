@@ -68,7 +68,7 @@ static int dpp_get_local_bootstrap(struct sigma_dut *dut,
 	const char *bs = get_param(cmd, "DPPBS");
 	const char *chan_list = get_param(cmd, "DPPChannelList");
 	char *pos, mac[50], buf[200], resp[1000], hex[2000];
-	const char *ifname = get_station_ifname();
+	const char *ifname = get_station_ifname(dut);
 	int res;
 
 	if (success)
@@ -735,7 +735,7 @@ out:
 static int dpp_display_own_qrcode(struct sigma_dut *dut)
 {
 	char buf[200], resp[2000];
-	const char *ifname = get_station_ifname();
+	const char *ifname = get_station_ifname(dut);
 #ifdef ANDROID
 	FILE *fp;
 #else /* ANDROID */
@@ -872,6 +872,7 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	const char *frametype = get_param(cmd, "DPPFrameType");
 	const char *attr = get_param(cmd, "DPPIEAttribute");
 	const char *action_type = get_param(cmd, "DPPActionType");
+	const char *tcp = get_param(cmd, "DPPOverTCP");
 	const char *role;
 	const char *val;
 	const char *conf_role;
@@ -885,7 +886,7 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 	int res;
 	unsigned int old_timeout;
 	int own_pkex_id = -1;
-	const char *ifname = get_station_ifname();
+	const char *ifname = get_station_ifname(dut);
 	const char *auth_events[] = {
 		"DPP-AUTH-SUCCESS",
 		"DPP-NOT-COMPATIBLE",
@@ -997,7 +998,7 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 					"Update hostapd operating channel to match listen needs");
 			dut->ap_channel = 6;
 
-			if (get_driver_type() == DRIVER_OPENWRT) {
+			if (get_driver_type(dut) == DRIVER_OPENWRT) {
 				snprintf(buf, sizeof(buf),
 					 "iwconfig %s channel %d",
 					 dut->hostapd_ifname, dut->ap_channel);
@@ -1335,6 +1336,11 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 				 akm_use_selector ? " akm_use_selector=1" : "",
 				 conn_status ? " conn_status=1" : "",
 				 conf2);
+		} else if (tcp && strcasecmp(bs, "QR") == 0) {
+			snprintf(buf, sizeof(buf),
+				 "DPP_AUTH_INIT peer=%d%s role=%s tcp_addr=%s%s%s",
+				 dpp_peer_bootstrap, own_txt, role, tcp,
+				 neg_freq, group_id);
 		} else if (strcasecmp(bs, "QR") == 0) {
 			snprintf(buf, sizeof(buf),
 				 "DPP_AUTH_INIT peer=%d%s role=%s%s%s",
@@ -1437,17 +1443,22 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 			}
 		}
 
-		snprintf(buf, sizeof(buf), "DPP_LISTEN %d role=%s%s",
-			 freq, role,
-			 (strcasecmp(bs, "QR") == 0 && mutual) ?
-			 " qr=mutual" : "");
+		if (tcp && strcasecmp(tcp, "yes") == 0) {
+			snprintf(buf, sizeof(buf), "DPP_CONTROLLER_START");
+		} else {
+			snprintf(buf, sizeof(buf), "DPP_LISTEN %d role=%s%s",
+				 freq, role,
+				 (strcasecmp(bs, "QR") == 0 && mutual) ?
+				 " qr=mutual" : "");
+		}
 		if (wpa_command(ifname, buf) < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,Failed to start DPP listen");
 			goto out;
 		}
 
-		if (get_driver_type() == DRIVER_OPENWRT) {
+		if (!(tcp && strcasecmp(tcp, "yes") == 0) &&
+		    get_driver_type(dut) == DRIVER_OPENWRT) {
 			snprintf(buf, sizeof(buf), "iwconfig %s channel %d",
 				 dut->hostapd_ifname, freq_to_channel(freq));
 			run_system(dut, buf);
@@ -1907,6 +1918,9 @@ static int dpp_automatic_dpp(struct sigma_dut *dut,
 out:
 	wpa_ctrl_detach(ctrl);
 	wpa_ctrl_close(ctrl);
+	if (tcp && strcasecmp(tcp, "yes") == 0 &&
+	    auth_role && strcasecmp(auth_role, "Responder") == 0)
+		wpa_command(ifname, "DPP_CONTROLLER_STOP");
 	dut->default_timeout = old_timeout;
 	return 0;
 err:
