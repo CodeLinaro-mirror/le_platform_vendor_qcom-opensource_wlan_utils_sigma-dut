@@ -3287,6 +3287,13 @@ static void get_if_name(struct sigma_dut *dut, char *ifname_str,
 }
 
 
+static int sae_pw_id_used(struct sigma_dut *dut)
+{
+	return dut->ap_sae_passwords &&
+		strchr(dut->ap_sae_passwords, ':');
+}
+
+
 static int owrt_ap_config_vap(struct sigma_dut *dut)
 {
 	char buf[256], *temp;
@@ -3465,6 +3472,12 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 					owrt_ap_set_list_vap(dut, vap_count +
 							     (wlan_tag - 1),
 							     "owe_groups", buf);
+					if (dut->owe_ptk_workaround)
+						owrt_ap_set_list_vap(
+							dut, vap_count +
+							(wlan_tag - 1),
+							"owe_ptk_workaround",
+							"1");
 				}
 			}
 		}
@@ -3771,6 +3784,10 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 					 dut->ap_sae_groups);
 				owrt_ap_set_list_vap(dut, vap_count,
 						     "owe_groups", buf);
+				if (dut->owe_ptk_workaround)
+					owrt_ap_set_list_vap(
+						dut, vap_count,
+						"owe_ptk_workaround", "1");
 			}
 
 			if (dut->ap_key_mgmt == AP_WPA2_OWE &&
@@ -4133,7 +4150,9 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 	if (dut->sae_pwe != SAE_PWE_DEFAULT || dut->sae_h2e_default) {
 		const char *sae_pwe = NULL;
 
-		if (dut->sae_pwe == SAE_PWE_LOOP)
+		if (dut->sae_pwe == SAE_PWE_LOOP && sae_pw_id_used(dut))
+			sae_pwe = "3";
+		else if (dut->sae_pwe == SAE_PWE_LOOP)
 			sae_pwe = "0";
 		else if (dut->sae_pwe == SAE_PWE_H2E)
 			sae_pwe = "1";
@@ -7369,6 +7388,7 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	const char *ifname;
 	char buf[500];
 	char path[100];
+	char ap_conf_path[100];
 	enum driver_type drv;
 	const char *key_mgmt;
 #ifdef ANDROID
@@ -7406,7 +7426,9 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	if (drv == DRIVER_OPENWRT)
 		return cmd_owrt_ap_config_commit(dut, conn, cmd);
 
-	f = fopen(SIGMA_TMPDIR "/sigma_dut-ap.conf", "w");
+	concat_sigma_tmpdir(dut, "/sigma_dut-ap.conf", ap_conf_path,
+			    sizeof(ap_conf_path));
+	f = fopen(ap_conf_path, "w");
 	if (f == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"%s: Failed to open sigma_dut-ap.conf",
@@ -7814,8 +7836,11 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 		fprintf(f, "wpa_key_mgmt=OWE\n");
 		fprintf(f, "rsn_pairwise=%s\n",
 			hostapd_cipher_name(dut->ap_cipher));
-		if (dut->ap_sae_groups)
+		if (dut->ap_sae_groups) {
 			fprintf(f, "owe_groups=%s\n", dut->ap_sae_groups);
+			if (dut->owe_ptk_workaround)
+				fprintf(f, "owe_ptk_workaround=1\n");
+		}
 		break;
 	case AP_OSEN:
 		fprintf(f, "osen=1\n");
@@ -7930,14 +7955,16 @@ skip_key_mgmt:
 	if (dut->sae_pwe != SAE_PWE_DEFAULT || dut->sae_h2e_default) {
 		const char *sae_pwe = NULL;
 
-		if (dut->sae_pwe == SAE_PWE_LOOP)
+		if (dut->sae_pwe == SAE_PWE_LOOP && sae_pw_id_used(dut))
+			sae_pwe = "3";
+		else if (dut->sae_pwe == SAE_PWE_LOOP)
 			sae_pwe = "0";
 		else if (dut->sae_pwe == SAE_PWE_H2E)
 			sae_pwe = "1";
 		else if (dut->sae_h2e_default)
 			sae_pwe = "2";
 		if (sae_pwe)
-			fprintf(f, "sae_pwe=%s", sae_pwe);
+			fprintf(f, "sae_pwe=%s\n", sae_pwe);
 	}
 
 	if (dut->sae_anti_clogging_threshold >= 0)
@@ -8131,6 +8158,11 @@ skip_key_mgmt:
 		fprintf(f, "dpp_controller=ipaddr=%s pkhash=%s\n",
 			dut->ap_dpp_conf_addr, dut->ap_dpp_conf_pkhash);
 
+	if (dut->ap_he_rtsthrshld == VALUE_ENABLED)
+		fprintf(f, "he_rts_threshold=512\n");
+	else if (dut->ap_he_rtsthrshld == VALUE_DISABLED)
+		fprintf(f, "he_rts_threshold=1024\n");
+
 	if ((dut->program == PROGRAM_VHT) ||
 	    (dut->program == PROGRAM_HE && dut->use_5g)) {
 		int vht_oper_centr_freq_idx;
@@ -8289,8 +8321,11 @@ skip_key_mgmt:
 		fprintf(f, "rsn_pairwise=CCMP\n");
 		fprintf(f, "ieee80211w=2\n");
 		fprintf(f, "ignore_broadcast_ssid=1\n");
-		if (dut->ap_sae_groups)
+		if (dut->ap_sae_groups) {
 			fprintf(f, "owe_groups=%s\n", dut->ap_sae_groups);
+			if (dut->owe_ptk_workaround)
+				fprintf(f, "owe_ptk_workaround=1\n");
+		}
 	}
 
 	if (dut->program == PROGRAM_OCE) {
@@ -8328,26 +8363,39 @@ skip_key_mgmt:
 	/* Set proper conf file permissions so that hostapd process
 	 * can access it.
 	 */
-	if (chmod(SIGMA_TMPDIR "/sigma_dut-ap.conf",
-		  S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
+	if (chmod(ap_conf_path, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"Error changing permissions");
 
 	gr = getgrnam("wifi");
-	if (!gr ||
-	    chown(SIGMA_TMPDIR "/sigma_dut-ap.conf", -1, gr->gr_gid) < 0)
+	if (!gr || chown(ap_conf_path, -1, gr->gr_gid) < 0)
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Error changing groupid");
 #endif /* ANDROID */
 
+	f = fopen(ap_conf_path, "r");
+	if (f) {
+		size_t len;
+
+		len = fread(buf, 1, sizeof(buf), f);
+		fclose(f);
+		if (len >= sizeof(buf))
+			len = sizeof(buf) - 1;
+		buf[len] = '\0';
+		sigma_dut_print(dut, DUT_MSG_DEBUG, "hostapd debug log:\n%s",
+				buf);
+	}
+
 	if (drv == DRIVER_QNXNTO) {
 		snprintf(buf, sizeof(buf),
-			 "hostapd -B %s%s %s%s" SIGMA_TMPDIR
-			 "/sigma_dut-ap.conf",
-			 dut->hostapd_debug_log ? "-ddKt -f " : "",
+			 "hostapd -B %s%s%s %s%s %s/sigma_dut-ap.conf",
+			 dut->hostapd_debug_log ? "-dddKt " : "",
+			 (dut->hostapd_debug_log && dut->hostapd_debug_log[0]) ?
+			 "-f " : "",
 			 dut->hostapd_debug_log ? dut->hostapd_debug_log : "",
 			 dut->hostapd_entropy_log ? " -e" : "",
 			 dut->hostapd_entropy_log ? dut->hostapd_entropy_log :
-			 "");
+			 "",
+			 dut->sigma_tmpdir);
 	} else {
 		/*
 		 * It looks like a monitor interface can cause some issues for
@@ -8361,16 +8409,19 @@ skip_key_mgmt:
 
 		snprintf(path, sizeof(path), "%shostapd",
 			 file_exists("hostapd") ? "./" : "");
-		snprintf(buf, sizeof(buf), "%s -B%s%s%s%s%s " SIGMA_TMPDIR
-			 "/sigma_dut-ap.conf",
+		snprintf(buf, sizeof(buf),
+			 "%s -B%s%s%s%s%s%s %s/sigma_dut-ap.conf",
 			 dut->hostapd_bin ? dut->hostapd_bin : path,
-			 dut->hostapd_debug_log ? " -ddKt -f" : "",
+			 dut->hostapd_debug_log ? " -dddKt" : "",
+			 (dut->hostapd_debug_log && dut->hostapd_debug_log[0]) ?
+			 " -f " : "",
 			 dut->hostapd_debug_log ? dut->hostapd_debug_log : "",
 			 dut->hostapd_entropy_log ? " -e" : "",
 			 dut->hostapd_entropy_log ? dut->hostapd_entropy_log :
 			 "",
 			 dut->use_hostapd_pid_file ?
-			 " -P " SIGMA_DUT_HOSTAPD_PID_FILE : "");
+			 " -P " SIGMA_DUT_HOSTAPD_PID_FILE : "",
+			 dut->sigma_tmpdir);
 	}
 
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "hostapd command: %s", buf);
@@ -8386,6 +8437,25 @@ skip_key_mgmt:
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Failed to talk to hostapd");
 		return 0;
+	}
+
+	if (dut->ap_ba_bufsize != BA_BUFSIZE_NOT_SET) {
+		int buf_size;
+
+		if (dut->ap_ba_bufsize == BA_BUFSIZE_256)
+			buf_size = 256;
+		else
+			buf_size = 64;
+
+		if ((drv == DRIVER_WCN || drv == DRIVER_LINUX_WCN) &&
+		    sta_set_addba_buf_size(dut, ifname, buf_size)) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,set_addba_buf_size failed");
+			return STATUS_SENT_ERROR;
+		}
+
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"setting addba buf_size=%d", buf_size);
 	}
 
 	if (drv == DRIVER_LINUX_WCN) {
@@ -8412,6 +8482,12 @@ skip_key_mgmt:
 			return -1;
 		}
 	}
+
+	/* Configure the driver with LDPC setting for AP mode as a new vdev is
+	 * created when hostapd is started.
+	 */
+	if (drv == DRIVER_WCN || drv == DRIVER_LINUX_WCN)
+		wcn_config_ap_ldpc(dut, ifname);
 
 	if (dut->ap_l2tif) {
 		snprintf(path, sizeof(path),
@@ -11057,6 +11133,7 @@ static enum sigma_cmd_result cmd_ap_get_parameter(struct sigma_dut *dut,
 	char value[256], resp[512];
 	const char *param = get_param(cmd, "parameter");
 	const char *ifname = get_param(cmd, "Interface");
+	const char *var;
 
 	if (!ifname)
 		ifname = get_main_ifname(dut);
@@ -11082,6 +11159,18 @@ static enum sigma_cmd_result cmd_ap_get_parameter(struct sigma_dut *dut,
 			return -2;
 		}
 		snprintf(resp, sizeof(resp), "PSK,%s", value);
+	} else if (strcasecmp(param, "PMK") == 0) {
+		var = get_param(cmd, "STA_MAC_Address");
+		if (!var)
+			return INVALID_SEND_STATUS;
+		snprintf(resp, sizeof(resp), "GET_PMK %s", var);
+		if (hapd_command_resp(ifname, resp, &resp[4],
+				      sizeof(resp) - 4) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,GET_PMK failed");
+			return STATUS_SENT_ERROR;
+		}
+		memcpy(resp, "PMK,", 4);
 	} else {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Unsupported parameter");

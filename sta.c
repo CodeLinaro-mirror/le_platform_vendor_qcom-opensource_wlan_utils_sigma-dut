@@ -2229,7 +2229,9 @@ static enum sigma_cmd_result cmd_sta_set_psk(struct sigma_dut *dut,
 			return STATUS_SENT_ERROR;
 		}
 	}
-	if (dut->sae_pwe == SAE_PWE_LOOP)
+	if (dut->sae_pwe == SAE_PWE_LOOP && get_param(cmd, "PasswordId"))
+		sae_pwe = 3;
+	else if (dut->sae_pwe == SAE_PWE_LOOP)
 		sae_pwe = 0;
 	else if (dut->sae_pwe == SAE_PWE_H2E)
 		sae_pwe = 1;
@@ -2931,9 +2933,12 @@ static int sta_set_owe(struct sigma_dut *dut, struct sigma_conn *conn,
 					"Failed to set OWE DH Param element override");
 			return -2;
 		}
-	} else if (val && set_network(ifname, id, "owe_group", val) < 0) {
+	} else if (val &&
+		   (set_network(ifname, id, "owe_group", val) < 0 ||
+		    (dut->owe_ptk_workaround &&
+		     set_network(ifname, id, "owe_ptk_workaround", "1") < 0))) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
-				"Failed to clear owe_group");
+				"Failed to set owe_group");
 		return -2;
 	}
 
@@ -6657,14 +6662,79 @@ static int sta_get_parameter_he(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static enum sigma_cmd_result sta_get_pmk(struct sigma_dut *dut,
+					 struct sigma_conn *conn,
+					 struct sigma_cmd *cmd)
+{
+	const char *intf = get_param(cmd, "Interface");
+	char buf[4096], bssid[20], resp[200], *pos, *tmp;
+
+	snprintf(buf, sizeof(buf), "PMKSA_GET %d", dut->infra_network_id);
+	if (wpa_command_resp(intf, buf, buf, sizeof(buf)) < 0 ||
+	    strncmp(buf, "UNKNOWN COMMAND", 15) == 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,PMKSA_GET not supported");
+		return STATUS_SENT_ERROR;
+	}
+
+	if (strncmp(buf, "FAIL", 4) == 0 ||
+	    get_wpa_status(intf, "bssid", bssid, sizeof(bssid)) < 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,Could not find current network");
+		return STATUS_SENT_ERROR;
+	}
+
+	pos = buf;
+	while (pos) {
+		if (strncmp(pos, bssid, 17) == 0) {
+			pos = strchr(pos, ' ');
+			if (!pos)
+				goto fail;
+			pos++;
+			pos = strchr(pos, ' ');
+			if (!pos)
+				goto fail;
+			pos++;
+			tmp = strchr(pos, ' ');
+			if (!tmp)
+				goto fail;
+			*tmp = '\0';
+			break;
+		}
+
+	fail:
+		pos = strchr(pos, '\n');
+		if (pos)
+			pos++;
+	}
+
+	if (!pos) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,PMK not available");
+		return STATUS_SENT_ERROR;
+	}
+
+	snprintf(resp, sizeof(resp), "PMK,%s", pos);
+	send_resp(dut, conn, SIGMA_COMPLETE, resp);
+	return STATUS_SENT;
+}
+
+
 static enum sigma_cmd_result cmd_sta_get_parameter(struct sigma_dut *dut,
 						   struct sigma_conn *conn,
 						   struct sigma_cmd *cmd)
 {
 	const char *program = get_param(cmd, "Program");
+	const char *parameter = get_param(cmd, "Parameter");
 
-	if (program == NULL)
-		return -1;
+	if (!parameter)
+		return INVALID_SEND_STATUS;
+
+	if (strcasecmp(parameter, "PMK") == 0)
+		return sta_get_pmk(dut, conn, cmd);
+
+	if (!program)
+		return INVALID_SEND_STATUS;
 
 	if (strcasecmp(program, "P2PNFC") == 0)
 		return p2p_cmd_sta_get_parameter(dut, conn, cmd);
@@ -6994,8 +7064,8 @@ static int sta_set_2g_vht_supp(struct sigma_dut *dut, const char *intf, int cfg)
 #endif /* NL80211_SUPPORT */
 
 
-static int sta_set_addba_buf_size(struct sigma_dut *dut,
-				  const char *intf, int bufsize)
+int sta_set_addba_buf_size(struct sigma_dut *dut,
+			   const char *intf, int bufsize)
 {
 #ifdef NL80211_SUPPORT
 	struct nl_msg *msg;
