@@ -2050,6 +2050,11 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			return -2;
 	}
 
+	val = get_param(cmd, "BeaconProtection");
+	if (val && atoi(val) == 1 &&
+	    set_network(ifname, id, "beacon_prot", "1") < 0)
+		return ERROR_SEND_STATUS;
+
 	return id;
 }
 
@@ -2229,6 +2234,16 @@ static enum sigma_cmd_result cmd_sta_set_psk(struct sigma_dut *dut,
 			return STATUS_SENT_ERROR;
 		}
 	}
+
+	val = get_param(cmd, "Clear_RSNXE");
+	if (val && strcmp(val, "1") == 0 &&
+	    (wpa_command(intf, "SET rsnxe_override_assoc ") ||
+	     wpa_command(intf, "SET rsnxe_override_eapol "))) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Failed to clear RSNXE");
+		return ERROR_SEND_STATUS;
+	}
+
 	if (dut->sae_pwe == SAE_PWE_LOOP && get_param(cmd, "PasswordId"))
 		sae_pwe = 3;
 	else if (dut->sae_pwe == SAE_PWE_LOOP)
@@ -6449,14 +6464,12 @@ static enum sigma_cmd_result cmd_sta_reassoc(struct sigma_dut *dut,
 			status = ERROR_SEND_STATUS;
 			goto close_mon_conn;
 		}
-		res = snprintf(buf, sizeof(buf), "DRIVER FASTREASSOC %s %d",
+		res = snprintf(buf, sizeof(buf), "FASTREASSOC %s %d",
 			       bssid, chan);
-		if (res > 0 && res < (int) sizeof(buf))
-			res = wpa_command(intf, buf);
-
-		if (res < 0 || res >= (int) sizeof(buf)) {
+		if (res < 0 || res >= (int) sizeof(buf) ||
+		    wcn_driver_cmd(intf, buf) < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "errorCode,Failed to run DRIVER FASTREASSOC");
+				  "errorCode,Failed to run FASTREASSOC");
 			goto close_mon_conn;
 		}
 		sigma_dut_print(dut, DUT_MSG_INFO,
@@ -6677,20 +6690,18 @@ static enum sigma_cmd_result sta_get_pmk(struct sigma_dut *dut,
 		if (strncmp(pos, bssid, 17) == 0) {
 			pos = strchr(pos, ' ');
 			if (!pos)
-				goto fail;
+				break;
 			pos++;
 			pos = strchr(pos, ' ');
 			if (!pos)
-				goto fail;
+				break;
 			pos++;
 			tmp = strchr(pos, ' ');
 			if (!tmp)
-				goto fail;
+				break;
 			*tmp = '\0';
 			break;
 		}
-
-	fail:
 		pos = strchr(pos, '\n');
 		if (pos)
 			pos++;
@@ -7963,6 +7974,9 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 		hlp_thread_cleanup(dut);
 #endif /* ANDROID */
 	}
+
+	if (dut->program == PROGRAM_QM)
+		wpa_command(intf, "SET interworking 1");
 
 	dut->akm_values = 0;
 	dut->sta_ft_ds = 0;
@@ -12771,10 +12785,12 @@ static enum sigma_cmd_result cmd_sta_scan(struct sigma_dut *dut,
 					  struct sigma_cmd *cmd)
 {
 	const char *intf = get_param(cmd, "Interface");
-	const char *val, *bssid, *ssid;
+	const char *val, *bssid, *ssid, *scan_freq, *short_ssid;
 	char buf[4096];
 	char ssid_hex[65];
+	int wildcard_ssid = 0;
 	int res;
+	enum sigma_cmd_result status;
 
 	start_sta_mode(dut);
 
@@ -12812,6 +12828,12 @@ static enum sigma_cmd_result cmd_sta_scan(struct sigma_dut *dut,
 	bssid = get_param(cmd, "Bssid");
 	ssid = get_param(cmd, "Ssid");
 
+	if (ssid && strcasecmp(ssid, "ZeroLength") == 0 &&
+	    dut->device_type == STA_testbed) {
+		ssid = NULL;
+		wildcard_ssid = 1;
+	}
+
 	if (ssid) {
 		if (2 * strlen(ssid) >= sizeof(ssid_hex)) {
 			send_resp(dut, conn, SIGMA_ERROR,
@@ -12821,21 +12843,58 @@ static enum sigma_cmd_result cmd_sta_scan(struct sigma_dut *dut,
 		ascii2hexstr(ssid, ssid_hex);
 	}
 
-	res = snprintf(buf, sizeof(buf), "SCAN%s%s%s%s",
+	short_ssid = get_param(cmd, "ShortSSID");
+	if (short_ssid) {
+		uint32_t short_ssid_hex;
+
+		short_ssid_hex = strtoul(short_ssid, NULL, 16);
+		short_ssid_hex = ((short_ssid_hex & 0xFF) << 24) |
+			(((short_ssid_hex >> 8) & 0xFF) << 16) |
+			(((short_ssid_hex >> 16) & 0xFF) << 8) |
+			((short_ssid_hex >> 24) & 0xFF);
+
+		res = snprintf(buf, sizeof(buf),
+			       "VENDOR_ELEM_ADD 14 ff053a%08x",
+			       short_ssid_hex);
+		if (res < 0 || res >= (int) sizeof(buf) ||
+		    wpa_command(intf, buf)) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to add short SSID");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	scan_freq = get_param(cmd, "ChnlFreq");
+
+	res = snprintf(buf, sizeof(buf), "SCAN%s%s%s%s%s%s%s",
 			bssid ? " bssid=": "",
 			bssid ? bssid : "",
 			ssid ? " ssid " : "",
-			ssid ? ssid_hex : "");
-	if (res < 0 || res >= (int) sizeof(buf))
-		return -1;
+			ssid ? ssid_hex : "",
+			wildcard_ssid ? " wildcard_ssid=1" : "",
+			scan_freq ? " freq=" : "",
+			scan_freq ? scan_freq : "");
+	if (res < 0 || res >= (int) sizeof(buf)) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Could not build scan command");
+		status = STATUS_SENT_ERROR;
+		goto remove_s_ssid;
+	}
 
 	if (wpa_command(intf, buf)) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Could not start "
 			  "scan");
-		return 0;
+		status = STATUS_SENT_ERROR;
+	} else {
+		status = SUCCESS_SEND_STATUS;
 	}
 
-	return 1;
+remove_s_ssid:
+	if (short_ssid && wpa_command(intf, "VENDOR_ELEM_REMOVE 14 *"))
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to delete vendor element");
+
+	return status;
 }
 
 
