@@ -3001,6 +3001,13 @@ static int sta_set_owe(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (set_network(ifname, id, "key_mgmt", "OWE") < 0)
 		return -2;
 
+	if (dut->owe_ptk_workaround &&
+	    set_network(ifname, id, "owe_ptk_workaround", "1") < 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to set owe_ptk_workaround to 1");
+		return -2;
+	}
+
 	val = get_param(cmd, "ECGroupID");
 	if (val && strcmp(val, "0") == 0) {
 		if (wpa_command(ifname,
@@ -3009,10 +3016,7 @@ static int sta_set_owe(struct sigma_dut *dut, struct sigma_conn *conn,
 					"Failed to set OWE DH Param element override");
 			return -2;
 		}
-	} else if (val &&
-		   (set_network(ifname, id, "owe_group", val) < 0 ||
-		    (dut->owe_ptk_workaround &&
-		     set_network(ifname, id, "owe_ptk_workaround", "1") < 0))) {
+	} else if (val && set_network(ifname, id, "owe_group", val) < 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"Failed to set owe_group");
 		return -2;
