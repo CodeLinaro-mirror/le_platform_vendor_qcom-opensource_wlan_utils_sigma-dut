@@ -452,6 +452,7 @@ struct sigma_dut {
 	int ap_rts;
 	int ap_frgmnt;
 	int ap_bcnint;
+	int ap_start_disabled;
 	struct qos_params {
 		int ac;
 		int cwmin;
@@ -543,10 +544,16 @@ struct sigma_dut {
 	char *ap_sae_groups;
 	int sae_anti_clogging_threshold;
 	int sae_reflection;
+	int ap_sae_commit_status;
+	int ap_sae_pk_omit;
 	int sae_confirm_immediate;
 	char ap_passphrase[101];
 	char ap_psk[65];
 	char *ap_sae_passwords;
+	char *ap_sae_pk_modifier;
+	char *ap_sae_pk_keypair;
+	char *ap_sae_pk_keypair_sig;
+	int ap_sae_pk;
 	char ap_wepkey[27];
 	char ap_radius_ipaddr[20];
 	int ap_radius_port;
@@ -694,6 +701,8 @@ struct sigma_dut {
 	int he_ul_mcs;
 	int he_mmss;
 	int he_srctrl_allow;
+
+	int ap_ocvc;
 
 	enum value_not_set_enabled_disabled ap_oce;
 	enum value_not_set_enabled_disabled ap_filsdscv;
@@ -913,6 +922,7 @@ struct sigma_dut {
 	char *dpp_peer_uri;
 	int dpp_local_bootstrap;
 	int dpp_conf_id;
+	int dpp_network_id;
 
 	u8 fils_hlp;
 	pthread_t hlp_thread;
@@ -945,6 +955,9 @@ struct sigma_dut {
 		SAE_PWE_H2E
 	} sae_pwe;
 	int owe_ptk_workaround;
+	int ocvc;
+	int client_privacy;
+	int saquery_oci_freq;
 };
 
 
@@ -1055,6 +1068,7 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 					   struct sigma_cmd *cmd);
 int ap_wps_registration(struct sigma_dut *dut, struct sigma_conn *conn,
 			struct sigma_cmd *cmd);
+const char * get_hostapd_ifname(struct sigma_dut *dut);
 
 /* sta.c */
 void sta_register_cmds(void);
@@ -1167,8 +1181,9 @@ int lowi_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 
 /* dpp.c */
-int dpp_dev_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
-			struct sigma_cmd *cmd);
+enum sigma_cmd_result dpp_dev_exec_action(struct sigma_dut *dut,
+					  struct sigma_conn *conn,
+					  struct sigma_cmd *cmd);
 
 /* dhcp.c */
 void process_fils_hlp(struct sigma_dut *dut);
@@ -1194,5 +1209,7 @@ void dev_register_cmds(void);
 void sniffer_register_cmds(void);
 void server_register_cmds(void);
 void miracast_register_cmds(void);
+int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
+		  const char *ifname);
 
 #endif /* SIGMA_DUT_H */
