@@ -2,17 +2,24 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2014-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018, The Linux Foundation
+ * Copyright (c) 2005-2011, Jouni Malinen <j@w1.fi>
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
 
 #include "sigma_dut.h"
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include "wpa_helpers.h"
 
 enum driver_type wifi_chip_type = DRIVER_NOT_SET;
 enum openwrt_driver_type openwrt_chip_type = OPENWRT_DRIVER_NOT_SET;
 
+struct wcn_drv_priv_cmd {
+	char *buf;
+	int used_len;
+	int total_len;
+};
 
 int file_exists(const char *fname)
 {
@@ -44,7 +51,7 @@ int set_wifi_chip(const char *chip_type)
 }
 
 
-enum driver_type get_driver_type(void)
+enum driver_type get_driver_type(struct sigma_dut *dut)
 {
 	struct stat s;
 	if (wifi_chip_type == DRIVER_NOT_SET) {
@@ -52,7 +59,7 @@ enum driver_type get_driver_type(void)
 		ssize_t len;
 		char link[256];
 		char buf[256];
-		char *ifname = get_station_ifname();
+		const char *ifname = get_station_ifname(dut);
 
 		snprintf(buf, sizeof(buf), "/sys/class/net/%s/device/driver",
 			 ifname);
@@ -95,9 +102,10 @@ enum sigma_program sigma_program_to_enum(const char *prog)
 	if (strcasecmp(prog, "HS2") == 0)
 		return PROGRAM_HS2;
 	if (strcasecmp(prog, "HS2_R2") == 0 ||
-	    strcasecmp(prog, "HS2-R2") == 0 ||
-	    strcasecmp(prog, "HS2-R3") == 0)
+	    strcasecmp(prog, "HS2-R2") == 0)
 		return PROGRAM_HS2_R2;
+	if (strcasecmp(prog, "HS2-R3") == 0)
+		return PROGRAM_HS2_R3;
 	if (strcasecmp(prog, "WFD") == 0)
 		return PROGRAM_WFD;
 	if (strcasecmp(prog, "DisplayR2") == 0)
@@ -128,6 +136,8 @@ enum sigma_program sigma_program_to_enum(const char *prog)
 		return PROGRAM_WPA3;
 	if (strcasecmp(prog, "HE") == 0)
 		return PROGRAM_HE;
+	if (strcasecmp(prog, "QM") == 0)
+		return PROGRAM_QM;
 
 	return PROGRAM_UNKNOWN;
 }
@@ -145,7 +155,7 @@ static int parse_hex(char c)
 }
 
 
-static int hex_byte(const char *str)
+int hex_byte(const char *str)
 {
 	int res1, res2;
 
@@ -214,8 +224,23 @@ fail:
 }
 
 
-unsigned int channel_to_freq(unsigned int channel)
+int is_60g_sigma_dut(struct sigma_dut *dut)
 {
+	return dut->program == PROGRAM_60GHZ ||
+		(dut->program == PROGRAM_WPS &&
+		 (get_driver_type(dut) == DRIVER_WIL6210));
+}
+
+
+unsigned int channel_to_freq(struct sigma_dut *dut, unsigned int channel)
+{
+	if (is_60g_sigma_dut(dut)) {
+		if (channel >= 1 && channel <= 4)
+			return 58320 + 2160 * channel;
+
+		return 0;
+	}
+
 	if (channel >= 1 && channel <= 13)
 		return 2407 + 5 * channel;
 	if (channel == 14)
@@ -235,7 +260,17 @@ unsigned int freq_to_channel(unsigned int freq)
 		return 14;
 	if (freq >= 5180 && freq <= 5825)
 		return (freq - 5000) / 5;
+	if (freq >= 58320 && freq <= 64800)
+		return (freq - 58320) / 2160;
 	return 0;
+}
+
+
+int is_ipv6_addr(const char *str)
+{
+	struct sockaddr_in6 addr;
+
+	return inet_pton(AF_INET6, str, &(addr.sin6_addr));
 }
 
 
@@ -247,6 +282,27 @@ void convert_mac_addr_to_ipv6_lladdr(u8 *mac_addr, char *ipv6_buf,
 	snprintf(ipv6_buf, buf_len, "fe80::%02x%02x:%02xff:fe%02x:%02x%02x",
 		 temp, mac_addr[1], mac_addr[2],
 		 mac_addr[3], mac_addr[4], mac_addr[5]);
+}
+
+
+size_t convert_mac_addr_to_ipv6_linklocal(const u8 *mac_addr, u8 *ipv6)
+{
+	int i;
+
+	ipv6[0] = 0xfe;
+	ipv6[1] = 0x80;
+	for (i = 2; i < 8; i++)
+		ipv6[i] = 0;
+	ipv6[8] = mac_addr[0] ^ 0x02;
+	ipv6[9] = mac_addr[1];
+	ipv6[10] = mac_addr[2];
+	ipv6[11] = 0xff;
+	ipv6[12] = 0xfe;
+	ipv6[13] = mac_addr[3];
+	ipv6[14] = mac_addr[4];
+	ipv6[15] = mac_addr[5];
+
+	return 16;
 }
 
 
@@ -514,3 +570,199 @@ void nl80211_deinit(struct sigma_dut *dut, struct nl80211_ctx *ctx)
 }
 
 #endif /* NL80211_SUPPORT */
+
+
+static int get_wps_pin_checksum(int pin)
+{
+	int a = 0;
+
+	while (pin > 0) {
+		a += 3 * (pin % 10);
+		pin = pin / 10;
+		a += (pin % 10);
+		pin = pin / 10;
+	}
+
+	return (10 - (a % 10)) % 10;
+}
+
+
+int get_wps_pin_from_mac(struct sigma_dut *dut, const char *macaddr,
+			 char *pin, size_t len)
+{
+	unsigned char mac[ETH_ALEN];
+	int tmp, checksum;
+
+	if (len < 9)
+		return -1;
+	if (parse_mac_address(dut, macaddr, mac))
+		return -1;
+
+	/*
+	 * get 7 digit PIN from the last 24 bits of MAC
+	 * range 1000000 - 9999999
+	 */
+	tmp = (mac[5] & 0xFF) | ((mac[4] & 0xFF) << 8) |
+	      ((mac[3] & 0xFF) << 16);
+	tmp = (tmp % 9000000) + 1000000;
+	checksum = get_wps_pin_checksum(tmp);
+	snprintf(pin, len, "%07d%01d", tmp, checksum);
+	return 0;
+}
+
+
+int get_wps_forced_version(struct sigma_dut *dut, const char *str)
+{
+	int major, minor, result = 0;
+	int count = sscanf(str, "%d.%d", &major, &minor);
+
+	if (count == 2) {
+		result = major * 16 + minor;
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"Force WPS version to 0x%02x (%s)",
+				result, str);
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Invalid WPS version %s", str);
+	}
+
+	return result;
+}
+
+
+void str_remove_chars(char *str, char ch)
+{
+	char *pr = str, *pw = str;
+
+	while (*pr) {
+		*pw = *pr++;
+		if (*pw != ch)
+			pw++;
+	}
+	*pw = '\0';
+}
+
+
+static const char base64_table[65] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+
+int base64_encode(const char *src, size_t len, char *out, size_t out_len)
+{
+	unsigned char *pos;
+	const unsigned char *end, *in;
+	size_t olen;
+
+	olen = len * 4 / 3 + 4; /* 3-byte blocks to 4-byte */
+	olen++; /* nul termination */
+	if (olen < len || olen > out_len)
+		return -1;
+
+	end = (unsigned char *)(src + len);
+	in = (unsigned char *)src;
+	pos = (unsigned char *)out;
+	while (end - in >= 3) {
+		*pos++ = base64_table[(in[0] >> 2) & 0x3f];
+		*pos++ = base64_table[(((in[0] & 0x03) << 4) |
+				       (in[1] >> 4)) & 0x3f];
+		*pos++ = base64_table[(((in[1] & 0x0f) << 2) |
+				       (in[2] >> 6)) & 0x3f];
+		*pos++ = base64_table[in[2] & 0x3f];
+		in += 3;
+	}
+
+	if (end - in) {
+		*pos++ = base64_table[(in[0] >> 2) & 0x3f];
+		if (end - in == 1) {
+			*pos++ = base64_table[((in[0] & 0x03) << 4) & 0x3f];
+			*pos++ = '=';
+		} else {
+			*pos++ = base64_table[(((in[0] & 0x03) << 4) |
+					       (in[1] >> 4)) & 0x3f];
+			*pos++ = base64_table[((in[1] & 0x0f) << 2) & 0x3f];
+		}
+		*pos++ = '=';
+	}
+
+	*pos = '\0';
+	return 0;
+}
+
+
+int random_get_bytes(char *buf, size_t len)
+{
+	FILE *f;
+	size_t rc;
+
+	f = fopen("/dev/urandom", "rb");
+	if (!f)
+		return -1;
+
+	rc = fread(buf, 1, len, f);
+	fclose(f);
+
+	return rc != len ? -1 : 0;
+}
+
+
+int get_enable_disable(const char *val)
+{
+	if (strcasecmp(val, "enable") == 0 ||
+	    strcasecmp(val, "enabled") == 0 ||
+	    strcasecmp(val, "on") == 0 ||
+	    strcasecmp(val, "yes") == 0)
+		return 1;
+	return atoi(val);
+}
+
+
+int wcn_driver_cmd(const char *ifname, char *buf)
+{
+	int s, res;
+	size_t buf_len;
+	struct wcn_drv_priv_cmd priv_cmd;
+	struct ifreq ifr;
+
+	s = socket(PF_INET, SOCK_DGRAM, 0);
+	if (s < 0) {
+		perror("socket");
+		return -1;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	memset(&priv_cmd, 0, sizeof(priv_cmd));
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	buf_len = strlen(buf);
+	priv_cmd.buf = buf;
+	priv_cmd.used_len = buf_len;
+	priv_cmd.total_len = buf_len;
+	ifr.ifr_data = (void *) &priv_cmd;
+	res = ioctl(s, SIOCDEVPRIVATE + 1, &ifr);
+	close(s);
+	return res;
+}
+
+
+int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
+		  const char *ifname)
+{
+	char buf[200];
+
+	snprintf(buf, sizeof(buf), "ip -6 addr del %s/%s dev %s", ip, mask,
+		 ifname);
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+	if (system(buf) != 0) {
+		/*
+		 * This command may fail if the address being deleted does not
+		 * exist. Inaction here is intentional.
+		 */
+	}
+
+	snprintf(buf, sizeof(buf), "ip -6 addr add %s/%s dev %s", ip, mask,
+		 ifname);
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+	if (system(buf) != 0)
+		return -1;
+
+	return 0;
+}

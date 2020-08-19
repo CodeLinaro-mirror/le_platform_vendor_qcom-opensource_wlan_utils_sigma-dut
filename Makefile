@@ -3,6 +3,22 @@ ALL=sigma_dut
 
 all: $(ALL)
 
+ifdef UBSAN
+CC=clang
+CHECKS=undefined,unsigned-integer-overflow
+CFLAGS += -fsanitize=$(CHECKS)
+CFLAGS += -fno-sanitize-recover=all
+LDFLAGS += -fsanitize=$(CHECKS)
+LDFLAGS += -fno-sanitize-recover=all
+endif
+
+ifdef CFI
+CC=clang-6.0
+CFLAGS += -MMD -O2 -Wall -g
+CFLAGS += -flto -fvisibility=hidden -fsanitize=cfi -fno-sanitize-trap=cfi
+LDFLAGS += -flto -fvisibility=hidden -fsanitize=cfi -fno-sanitize-trap=cfi
+endif
+
 ifndef CC
 CC=gcc
 endif
@@ -56,14 +72,15 @@ CFLAGS += -DCONFIG_SNIFFER
 OBJS += sniffer.o
 endif
 
-ifndef NO_SERVER
+ifdef SERVER
 CFLAGS += -DCONFIG_SERVER
 OBJS += server.o
+LIBS += -lsqlite3
 endif
 
 ifdef MIRACAST
 OBJS += miracast.o
-CFLAGS += -DMIRACAST -DMIRACAST_DHCP_M
+CFLAGS += -DMIRACAST
 LIBS += -ldl
 endif
 
