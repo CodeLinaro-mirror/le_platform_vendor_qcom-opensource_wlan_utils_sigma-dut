@@ -1,7 +1,7 @@
 /*
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
- * Copyright (c) 2011-2014, Qualcomm Atheros, Inc.
+ * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include "wpa_ctrl.h"
 #include "wpa_helpers.h"
+#include "miracast.h"
 
 
 int run_system(struct sigma_dut *dut, const char *cmd)
@@ -19,9 +20,65 @@ int run_system(struct sigma_dut *dut, const char *cmd)
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "Running '%s'", cmd);
 	res = system(cmd);
 	if (res < 0) {
-		sigma_dut_print(dut, DUT_MSG_DEBUG, "Failed to execute "
-				"command '%s'", cmd);
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Failed to execute command '%s'", cmd);
 	}
+	return res;
+}
+
+
+int run_system_wrapper(struct sigma_dut *dut, const char *cmd, ...)
+{
+	va_list ap;
+	char *buf;
+	int bytes_required;
+	int res;
+
+	va_start(ap, cmd);
+	bytes_required = vsnprintf(NULL, 0, cmd, ap);
+	bytes_required += 1;
+	va_end(ap);
+	buf = malloc(bytes_required);
+	if (!buf) {
+		printf("ERROR!! No memory\n");
+		return -1;
+	}
+	va_start(ap, cmd);
+	vsnprintf(buf, bytes_required, cmd, ap);
+	va_end(ap);
+	res = run_system(dut, buf);
+	free(buf);
+	return res;
+}
+
+
+int run_iwpriv(struct sigma_dut *dut, const char *ifname, const char *cmd, ...)
+{
+	va_list ap;
+	char *buf;
+	int bytes_required;
+	int res;
+	size_t prefix_len;
+
+	if (!ifname)
+		return -1;
+	prefix_len = strlen(dut->priv_cmd) + 1 + strlen(ifname) + 1;
+	va_start(ap, cmd);
+	bytes_required = vsnprintf(NULL, 0, cmd, ap);
+	bytes_required += 1;
+	va_end(ap);
+	buf = malloc(prefix_len + bytes_required);
+	if (!buf) {
+		printf("ERROR!! No memory\n");
+		return -1;
+	}
+	snprintf(buf, prefix_len + bytes_required, "%s %s ",
+		 dut->priv_cmd, ifname);
+	va_start(ap, cmd);
+	vsnprintf(buf + prefix_len, bytes_required, cmd, ap);
+	va_end(ap);
+	res = run_system(dut, buf);
+	free(buf);
 	return res;
 }
 
@@ -56,7 +113,7 @@ static int get_60g_freq(int chan)
 #define END_IP_RANGE "192.168.43.100"
 #define FLUSH_IP_ADDR "0.0.0.0"
 
-static void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
+void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 {
 #ifdef __linux__
 	char buf[200];
@@ -76,6 +133,12 @@ static void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 		} else if (access("/system/bin/dhcptool", F_OK) != -1) {
 			snprintf(buf, sizeof(buf), "/system/bin/dhcptool %s",
 				 group_ifname);
+		} else if (access("/vendor/bin/dhcpcd", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/vendor/bin/dhcpcd %s",
+				 group_ifname);
+		} else if (access("/vendor/bin/dhcptool", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/vendor/bin/dhcptool %s",
+				 group_ifname);
 		} else {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"DHCP client program missing");
@@ -93,7 +156,7 @@ static void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 }
 
 
-static void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
+void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 {
 #ifdef __linux__
 	char path[128];
@@ -292,10 +355,10 @@ static int p2p_group_add(struct sigma_dut *dut, const char *ifname,
 	if (grp == NULL)
 		return -1;
 	memset(grp, 0, sizeof(*grp));
-	strncpy(grp->ifname, ifname, IFNAMSIZ);
+	strlcpy(grp->ifname, ifname, IFNAMSIZ);
 	grp->go = go;
-	strncpy(grp->grpid, grpid, P2P_GRP_ID_LEN);
-	strncpy(grp->ssid, ssid, sizeof(grp->ssid));
+	strlcpy(grp->grpid, grpid, P2P_GRP_ID_LEN);
+	strlcpy(grp->ssid, ssid, sizeof(grp->ssid));
 
 	grp->next = dut->groups;
 	dut->groups = grp;
@@ -348,11 +411,11 @@ static struct wfa_cs_p2p_group * p2p_group_get(struct sigma_dut *dut,
 	pos = strchr(grpid, ' ');
 	if (pos == NULL)
 		return NULL;
-	if (pos - grpid > (int) sizeof(go_dev_addr))
+	if (pos - grpid >= (int) sizeof(go_dev_addr))
 		return NULL;
 	memcpy(go_dev_addr, grpid, pos - grpid);
 	go_dev_addr[pos - grpid] = '\0';
-	strncpy(ssid, pos + 1, sizeof(ssid));
+	strlcpy(ssid, pos + 1, sizeof(ssid));
 	ssid[sizeof(ssid) - 1] = '\0';
 	printf("Trying to find suitable interface for group: go_dev_addr='%s' "
 	       "grpid='%s'\n", go_dev_addr, grpid);
@@ -462,8 +525,8 @@ static int p2p_peer_known(const char *ifname, const char *peer, int full)
 }
 
 
-static int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
-			     const char *peer, int full)
+int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
+		      const char *peer, int full)
 {
 	unsigned int count;
 
@@ -792,9 +855,12 @@ static int cmd_sta_start_autonomous_go(struct sigma_dut *dut,
 				       struct sigma_conn *conn,
 				       struct sigma_cmd *cmd)
 {
-	const char *intf = get_param(cmd, "Interface");
+	const char *intf = get_p2p_ifname(get_param(cmd, "Interface"));
 	const char *oper_chn = get_param(cmd, "OPER_CHN");
 	const char *ssid_param = get_param(cmd, "SSID");
+#ifdef MIRACAST
+	const char *rtsp = get_param(cmd, "RTSP");
+#endif /* MIRACAST */
 	int freq, chan, res;
 	char buf[256], grpid[100], resp[200];
 	struct wpa_ctrl *ctrl;
@@ -916,6 +982,14 @@ static int cmd_sta_start_autonomous_go(struct sigma_dut *dut,
 	p2p_group_add(dut, ifname, strcmp(gtype, "GO") == 0, grpid, ssid);
 
 	snprintf(resp, sizeof(resp), "GroupID,%s", grpid);
+
+#ifdef MIRACAST
+	if (rtsp && atoi(rtsp) == 1) {
+		/* Start RTSP Thread for incoming connections */
+		miracast_start_autonomous_go(dut, conn, cmd, ifname);
+	}
+#endif /* MIRACAST */
+
 	send_resp(dut, conn, SIGMA_COMPLETE, resp);
 	return 0;
 }
@@ -1057,10 +1131,14 @@ static int cmd_sta_p2p_start_group_formation(struct sigma_dut *dut,
 	int freq = 0, chan = 0, init;
 	char buf[256];
 	struct wpa_ctrl *ctrl;
+	int intent;
 
 	if (devid == NULL || intent_val == NULL)
 		return -1;
 
+	intent = atoi(intent_val);
+	if (intent > 15)
+		intent = 1;
 	if (init_go_neg)
 		init = atoi(init_go_neg);
 	else
@@ -1134,7 +1212,7 @@ static int cmd_sta_p2p_start_group_formation(struct sigma_dut *dut,
 		   " keypad" )),
 		 dut->persistent ? " persistent" : "",
 		 init ? "" : " auth",
-		 atoi(intent_val));
+		 intent);
 	if (freq > 0) {
 		snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf),
 			 " freq=%d", freq);
@@ -1577,10 +1655,17 @@ static int cmd_sta_set_wps_pbc(struct sigma_dut *dut, struct sigma_conn *conn,
 static int cmd_sta_wps_read_pin(struct sigma_dut *dut, struct sigma_conn *conn,
 				struct sigma_cmd *cmd)
 {
-	/* const char *intf = get_param(cmd, "Interface"); */
+	const char *intf = get_param(cmd, "Interface");
 	const char *grpid = get_param(cmd, "GroupID");
-	char *pin = "12345670"; /* TODO: use random PIN */
+	char pin[9], addr[20];
 	char resp[100];
+
+	if (get_wpa_status(intf, "address", addr, sizeof(addr)) < 0 ||
+	    get_wps_pin_from_mac(dut, addr, pin, sizeof(pin)) < 0) {
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"Failed to calculate PIN from MAC, use default");
+		strlcpy(pin, "12345670", sizeof(pin));
+	}
 
 	if (grpid) {
 		char buf[100];
@@ -1596,7 +1681,7 @@ static int cmd_sta_wps_read_pin(struct sigma_dut *dut, struct sigma_conn *conn,
 		}
 	}
 
-	strncpy(dut->wps_pin, pin, sizeof(dut->wps_pin));
+	strlcpy(dut->wps_pin, pin, sizeof(dut->wps_pin));
 	dut->wps_method = WFA_CS_WPS_PIN_DISPLAY;
 done:
 	snprintf(resp, sizeof(resp), "PIN,%s", pin);
@@ -1628,7 +1713,7 @@ static int cmd_sta_wps_read_label(struct sigma_dut *dut,
 		}
 	}
 
-	strncpy(dut->wps_pin, pin, sizeof(dut->wps_pin));
+	strlcpy(dut->wps_pin, pin, sizeof(dut->wps_pin));
 	dut->wps_method = WFA_CS_WPS_PIN_LABEL;
 	snprintf(resp, sizeof(resp), "LABEL,%s", pin);
 	send_resp(dut, conn, SIGMA_COMPLETE, resp);
@@ -1661,7 +1746,7 @@ static int cmd_sta_wps_enter_pin(struct sigma_dut *dut,
 		}
 	}
 
-	strncpy(dut->wps_pin, pin, sizeof(dut->wps_pin));
+	strlcpy(dut->wps_pin, pin, sizeof(dut->wps_pin));
 	dut->wps_pin[sizeof(dut->wps_pin) - 1] = '\0';
 	dut->wps_method = WFA_CS_WPS_PIN_KEYPAD;
 
@@ -1711,6 +1796,12 @@ int cmd_sta_p2p_reset(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *intf = get_param(cmd, "interface");
 	struct wfa_cs_p2p_group *grp, *prev;
 	char buf[256];
+
+#ifdef MIRACAST
+	if (dut->program == PROGRAM_WFD ||
+	    dut->program == PROGRAM_DISPLAYR2)
+		miracast_sta_reset_default(dut, conn, cmd);
+#endif /* MIRACAST */
 
 	dut->go = 0;
 	dut->p2p_client = 0;
@@ -1959,15 +2050,16 @@ static int cmd_sta_set_opportunistic_ps(struct sigma_dut *dut,
 		return 0;
 	}
 
-	if (wpa_command(grp->ifname, "P2P_SET oppps 1") < 0) {
-		send_resp(dut, conn, SIGMA_ERROR,
-			  "errorCode,Use of OppPS as GO not supported");
-		return 0;
-	}
 	snprintf(buf, sizeof(buf), "P2P_SET ctwindow %d", atoi(ctwindow));
 	if (wpa_command(grp->ifname, buf) < 0) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Use of CTWindow as GO not supported");
+		return 0;
+	}
+
+	if (wpa_command(grp->ifname, "P2P_SET oppps 1") < 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Use of OppPS as GO not supported");
 		return 0;
 	}
 
@@ -2433,8 +2525,8 @@ static int nfc_wps_read_passwd(struct sigma_dut *dut,
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
-	if ((ssid && strlen(ssid) >= 2 * sizeof(ssid_hex)) ||
-	    (passphrase && strlen(passphrase) >= 2 * sizeof(passphrase_hex))) {
+	if ((ssid && 2 * strlen(ssid) >= sizeof(ssid_hex)) ||
+	    (passphrase && 2 * strlen(passphrase) >= sizeof(passphrase_hex))) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Too long SSID/passphrase");
 		return 0;
