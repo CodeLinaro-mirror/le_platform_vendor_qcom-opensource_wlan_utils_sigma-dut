@@ -88,6 +88,17 @@
 "312e302f616f637069223e3c4465736372697074696f6e3e46726565207769746820796f7572" \
 "20737562736372697074696f6e213c2f4465736372697074696f6e3e3c2f506c616e3e"
 
+#define SAE_PK_KEY_1 \
+	"MHcCAQEEIDNNDttjdQmLVyr1DOrWiapbMt15LDn4hnMLIXrBLAN+oAoGCCqGSM49AwEHoUQDQgAENAv4e3IlpYkqQjc/9KM4O4Athh6iY25wlT8Gdg+EhR7yoMR03nHri6QaaLogXxTsa9qGyXj1K9G8DEOyHMQCbg=="
+#define SAE_PK_KEY_2 \
+	"MHcCAQEEIF4LGkE30VdIeJe1ZVOo3TmkvT9RKRx30+yOx/9nhQY9oAoGCCqGSM49AwEHoUQDQgAE3PNzZH4m41vT5q6W7p5Q6B9owz5MHLwCUnpK84YRTVDLKKZXOPYxSHRh/O5Kz0OnVeOq1QfjEZRhNH79XhHCQQ=="
+#define SAE_PK_KEY_P256 \
+	"MHcCAQEEIAJIGlfnteonDb7rQyP/SGQjwzrZAnfrXIm4280VWajYoAoGCCqGSM49AwEHoUQDQgAEeRkstKQV+FSAMqBayqFknn2nAQsdsh/MhdX6tiHOTAFin/sUMFRMyspPtIu7YvlKdsexhI0jPVhaYZn1jKWhZg=="
+#define SAE_PK_KEY_P384 \
+	"MIGkAgEBBDB7iMoR2se0sWriXYCEsiLd8WFEblxWlCqb5kD7JgZfQjjylGwqOgIE7JShOOjE0Z2gBwYFK4EEACKhZANiAATntlmb7rlUopsaA/w5Uhut9jLlcY2sJdT6IzCdQ8uzuxk9Fgh+dwS25pd+lWC91rQ7kyjfZRpoePhwQasnjGRAl6rH2VWI/XtI5Q9iFXbhEaWEdKzWjetd6B5OPWy/BQg="
+#define SAE_PK_KEY_P521 \
+	"MIHcAgEBBEIBuNKSnOQY5ZVdBgWiXcL1Gr/W+VCw69nOte1gT4sqdVeV3grCl5HJxogVG2LFdtnEDLJrs0AtFoFN9nWnIuMu+ZWgBwYFK4EEACOhgYkDgYYABADuDQkFO2102xXwNnoGpBU+13kNuxZ/gwy8+G0UG75h6iiTqNWRaQIpSWgTmPNER7Ubb7etyXaoOTnsq4v4f9m8wgDt2LMZptHvUkHCq522rRK43ITmCayelbHWY1FhhAE1ETXRItSV8nLymjliEtjdfP45dsr25ySlkSaVCBNUFrAtfw=="
+
 /*
  * MTU for Ethernet need to take into account 8-byte SNAP header
  * to be added when encapsulating Ethernet frame into 802.11.
@@ -1890,6 +1901,10 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	if (val)
 		dut->he_srctrl_allow = atoi(val);
 
+	val = get_param(cmd, "ocvc");
+	if (val)
+		dut->ap_ocvc = atoi(val);
+
 	return SUCCESS_SEND_STATUS;
 }
 
@@ -2091,6 +2106,22 @@ static enum sigma_cmd_result cmd_ap_send_addba_req(struct sigma_dut *dut,
 }
 
 
+static const char * get_sae_pk_key(const char *file_name)
+{
+	if (strcasecmp(file_name, "saepk1.pem") == 0)
+		return SAE_PK_KEY_1;
+	if (strcasecmp(file_name, "saepk2.pem") == 0)
+		return SAE_PK_KEY_2;
+	if (strcasecmp(file_name, "saepkP256.pem") == 0)
+		return SAE_PK_KEY_P256;
+	if (strcasecmp(file_name, "saepkP384.pem") == 0)
+		return SAE_PK_KEY_P384;
+	if (strcasecmp(file_name, "saepkP521.pem") == 0)
+		return SAE_PK_KEY_P521;
+	return NULL;
+}
+
+
 static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 						 struct sigma_conn *conn,
 						 struct sigma_cmd *cmd)
@@ -2244,6 +2275,14 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 		dut->ap_sae_passwords = strdup(val);
 	}
 
+	val = get_param(cmd, "SAE_Commit_StatusCode");
+	if (val)
+		dut->ap_sae_commit_status = atoi(val);
+
+	val = get_param(cmd, "SAE_PK_Omit");
+	if (val)
+		dut->ap_sae_pk_omit = get_enable_disable(val);
+
 	val = get_param(cmd, "SAE_Confirm_Immediate");
 	if (val)
 		dut->sae_confirm_immediate = get_enable_disable(val);
@@ -2260,6 +2299,52 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 				  "errorCode,Unsupported sae_pwe value");
 			return STATUS_SENT_ERROR;
 		}
+	}
+
+	val = get_param(cmd, "sae_pk");
+	if (val)
+		dut->ap_sae_pk = atoi(val);
+
+	val = get_param(cmd, "SAE_PK_KeyPair");
+	if (!val)
+		val = get_param(cmd, "SAE_PK_KeyPairMism");
+	if (val) {
+		free(dut->ap_sae_pk_keypair);
+		dut->ap_sae_pk_keypair = NULL;
+
+		val = get_sae_pk_key(val);
+		if (val)
+			dut->ap_sae_pk_keypair = strdup(val);
+
+		if (!dut->ap_sae_pk_keypair) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unknown SAE_PK_KeyPair value");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "SAE_PK_KeyPairSigOverride");
+	if (val) {
+		free(dut->ap_sae_pk_keypair_sig);
+		dut->ap_sae_pk_keypair_sig = NULL;
+
+		val = get_sae_pk_key(val);
+		if (val)
+			dut->ap_sae_pk_keypair_sig = strdup(val);
+
+		if (!dut->ap_sae_pk_keypair_sig) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unknown SAE_PK_KeyPairSigOverride value");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "SAE_PK_Modifier");
+	if (!val)
+		val = get_param(cmd, "SAE_PK_ModifierMism");
+	if (val) {
+		free(dut->ap_sae_pk_modifier);
+		dut->ap_sae_pk_modifier = strdup(val);
 	}
 
 	val = get_param(cmd, "RSNXE_Content");
@@ -3258,7 +3343,7 @@ static int set_anqp_elem_value(struct sigma_dut *dut, const char *ifname,
 }
 
 
-static const char * get_hostapd_ifname(struct sigma_dut *dut)
+const char * get_hostapd_ifname(struct sigma_dut *dut)
 {
 	enum driver_type drv;
 
@@ -3750,7 +3835,24 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 			else
 				owrt_ap_set_vap(dut, vap_count, "sae", "0");
 
-			if (dut->ap_key_mgmt == AP_WPA2_SAE) {
+			if (dut->ap_key_mgmt == AP_WPA2_SAE && dut->ap_sae_pk &&
+			    dut->ap_sae_pk_keypair_sig) {
+				snprintf(buf, sizeof(buf), "%s|pk=%s:%s:%s",
+					 dut->ap_passphrase,
+					 dut->ap_sae_pk_modifier,
+					 dut->ap_sae_pk_keypair,
+					 dut->ap_sae_pk_keypair_sig);
+				owrt_ap_set_vap(dut, vap_count, "sae_password",
+						buf);
+			} else if (dut->ap_key_mgmt == AP_WPA2_SAE &&
+				   dut->ap_sae_pk) {
+				snprintf(buf, sizeof(buf), "%s|pk=%s:%s",
+					 dut->ap_passphrase,
+					 dut->ap_sae_pk_modifier,
+					 dut->ap_sae_pk_keypair);
+				owrt_ap_set_vap(dut, vap_count, "sae_password",
+						buf);
+			} else if (dut->ap_key_mgmt == AP_WPA2_SAE) {
 				snprintf(buf, sizeof(buf), "%s",
 					 dut->ap_passphrase);
 				owrt_ap_set_vap(dut, vap_count, "sae_password",
@@ -4219,6 +4321,12 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 
 	if (dut->sae_reflection)
 		owrt_ap_set_vap(dut, vap_count, "sae_reflection_attack", "1");
+	if (dut->ap_sae_commit_status >= 0) {
+		snprintf(buf, sizeof(buf), "%d", dut->ap_sae_commit_status);
+		owrt_ap_set_vap(dut, vap_count, "sae_commit_status", buf);
+	}
+	if (dut->ap_sae_pk_omit)
+		owrt_ap_set_vap(dut, vap_count, "sae_pk_omit", "1");
 	if (dut->sae_confirm_immediate)
 		owrt_ap_set_vap(dut, vap_count, "sae_confirm_immediate", "2");
 
@@ -4254,6 +4362,11 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 			break;
 		}
 	}
+
+	if (dut->ap_ocvc == 1)
+		owrt_ap_set_vap(dut, vap_count, "ocv", "1");
+	else if (dut->ap_ocvc == 0)
+		owrt_ap_set_vap(dut, vap_count, "ocv", "0");
 
 	return 1;
 }
@@ -7427,6 +7540,42 @@ static int ap_set_force_mcs(struct sigma_dut *dut, int force, int mcs)
 }
 
 
+static int write_hostapd_conf_password(struct sigma_dut *dut, FILE *f, int sae)
+{
+	if (sae && dut->ap_sae_pk) {
+		if (!dut->ap_sae_pk_modifier) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"SAE-PK modifier not configured");
+			return -1;
+		}
+		if (!dut->ap_sae_pk_keypair) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"SAE-PK keypair not configured");
+			return -1;
+		}
+		if (dut->ap_sae_pk_keypair_sig)
+			fprintf(f, "sae_password=%s|pk=%s:%s:%s\n",
+				dut->ap_passphrase,
+				dut->ap_sae_pk_modifier,
+				dut->ap_sae_pk_keypair,
+				dut->ap_sae_pk_keypair_sig);
+		else
+			fprintf(f, "sae_password=%s|pk=%s:%s\n",
+				dut->ap_passphrase,
+				dut->ap_sae_pk_modifier,
+				dut->ap_sae_pk_keypair);
+	} else if (sae) {
+		fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
+	} else if (!dut->ap_passphrase[0] && dut->ap_psk[0]) {
+		fprintf(f, "wpa_psk=%s", dut->ap_psk);
+	} else if (dut->ap_passphrase[0]) {
+		fprintf(f, "wpa_passphrase=%s\n", dut->ap_passphrase);
+	}
+
+	return 0;
+}
+
+
 enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 					   struct sigma_conn *conn,
 					   struct sigma_cmd *cmd)
@@ -7628,6 +7777,8 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 		fprintf(f, "ssid=QCA AP OOB\n");
 	if (dut->ap_bcnint)
 		fprintf(f, "beacon_int=%d\n", dut->ap_bcnint);
+	if (dut->ap_start_disabled)
+		fprintf(f, "start_disabled=1\n");
 
 	if (dut->ap_akm_values) {
 		struct {
@@ -7668,16 +7819,16 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 		if (dut->ap_group_cipher != AP_NO_GROUP_CIPHER_SET)
 			fprintf(f, "group_cipher=%s\n",
 				hostapd_cipher_name(dut->ap_group_cipher));
-		if ((dut->ap_akm_values &
-		     ((1 << AKM_SAE) | (1 << AKM_FT_SAE))) &&
-		    !(dut->ap_akm_values &
-		      ((1 << AKM_WPA_PSK) | (1 << AKM_FT_PSK))) &&
-		    dut->ap_passphrase[0])
-			fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
-		else if (!dut->ap_passphrase[0] && dut->ap_psk[0])
-			fprintf(f, "wpa_psk=%s", dut->ap_psk);
-		else if (dut->ap_passphrase[0])
-			fprintf(f, "wpa_passphrase=%s\n", dut->ap_passphrase);
+		if (write_hostapd_conf_password(
+			    dut, f,
+			    (dut->ap_akm_values &
+			     ((1 << AKM_SAE) | (1 << AKM_FT_SAE))) &&
+			    !(dut->ap_akm_values &
+			      ((1 << AKM_WPA_PSK) | (1 << AKM_FT_PSK))) &&
+			    dut->ap_passphrase[0]) < 0) {
+			fclose(f);
+			return ERROR_SEND_STATUS;
+		}
 		if (dut->ap_akm_values & ((1 << AKM_WPA_EAP) |
 					  (1 << AKM_FT_EAP) |
 					  (1 << AKM_EAP_SHA256) |
@@ -7755,12 +7906,11 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 		if (dut->ap_group_cipher != AP_NO_GROUP_CIPHER_SET)
 			fprintf(f, "group_cipher=%s\n",
 				hostapd_cipher_name(dut->ap_group_cipher));
-		if (dut->ap_key_mgmt == AP_WPA2_SAE)
-			fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
-		else if (!dut->ap_passphrase[0] && dut->ap_psk[0])
-			fprintf(f, "wpa_psk=%s", dut->ap_psk);
-		else
-			fprintf(f, "wpa_passphrase=%s\n", dut->ap_passphrase);
+		if (write_hostapd_conf_password(
+			    dut, f, dut->ap_key_mgmt == AP_WPA2_SAE) < 0) {
+			fclose(f);
+			return ERROR_SEND_STATUS;
+		}
 		break;
 	case AP_WPA2_EAP:
 	case AP_WPA2_EAP_MIXED:
@@ -7911,6 +8061,9 @@ skip_key_mgmt:
 		fprintf(f, "transition_disable=0x%02x\n",
 			dut->ap_transition_disable);
 
+	if (dut->ap_ocvc == 1 || dut->ap_ocvc == 0)
+		fprintf(f, "ocv=%d\n", dut->ap_ocvc);
+
 	switch (dut->ap_pmf) {
 	case AP_PMF_DISABLED:
 		break;
@@ -7989,6 +8142,10 @@ skip_key_mgmt:
 			dut->sae_anti_clogging_threshold);
 	if (dut->sae_reflection)
 		fprintf(f, "sae_reflection_attack=1\n");
+	if (dut->ap_sae_commit_status >= 0)
+		fprintf(f, "sae_commit_status=%d\n", dut->ap_sae_commit_status);
+	if (dut->ap_sae_pk_omit)
+		fprintf(f, "sae_pk_omit=1\n");
 	if (dut->sae_confirm_immediate)
 		fprintf(f, "sae_confirm_immediate=2\n");
 
@@ -8923,6 +9080,15 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_akm_values = 0;
 	free(dut->ap_sae_passwords);
 	dut->ap_sae_passwords = NULL;
+	dut->ap_sae_pk = 0;
+	free(dut->ap_sae_pk_modifier);
+	dut->ap_sae_pk_modifier = NULL;
+	free(dut->ap_sae_pk_keypair);
+	dut->ap_sae_pk_keypair = NULL;
+	free(dut->ap_sae_pk_keypair_sig);
+	dut->ap_sae_pk_keypair_sig = NULL;
+
+	dut->ap_ocvc = -1;
 
 	if (dut->program == PROGRAM_HS2 || dut->program == PROGRAM_HS2_R2 ||
 	    dut->program == PROGRAM_HS2_R3 ||
@@ -9203,6 +9369,8 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 
 	dut->sae_anti_clogging_threshold = -1;
 	dut->sae_reflection = 0;
+	dut->ap_sae_commit_status = -1;
+	dut->ap_sae_pk_omit = 0;
 	dut->sae_confirm_immediate = 0;
 	dut->sae_pwe = SAE_PWE_DEFAULT;
 
@@ -9219,6 +9387,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_dpp_conf_addr = NULL;
 	free(dut->ap_dpp_conf_pkhash);
 	dut->ap_dpp_conf_pkhash = NULL;
+	dut->ap_start_disabled = 0;
 
 	if (is_60g_sigma_dut(dut)) {
 		dut->ap_mode = AP_11ad;
@@ -12748,6 +12917,84 @@ static enum sigma_cmd_result cmd_ap_set_rfeature(struct sigma_dut *dut,
 {
 	/* const char *name = get_param(cmd, "NAME"); */
 	/* const char *type = get_param(cmd, "Type"); */
+	const char *val, *oci_chan, *oci_frametype;
+	char buf[100];
+	const char *ifname = get_hostapd_ifname(dut);
+
+	val = get_param(cmd, "ReassocResp_RSNXE_Used");
+	if (val) {
+		if (atoi(val) == 0)
+			snprintf(buf, sizeof(buf), "SET ft_rsnxe_used 2");
+		else
+			snprintf(buf, sizeof(buf), "SET ft_rsnxe_used 1");
+		if (hapd_command(ifname, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to set ft_rsnxe_used");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	oci_chan = get_param(cmd, "OCIChannel");
+	oci_frametype = get_param(cmd, "OCIFrameType");
+	if (oci_chan && oci_frametype) {
+		unsigned int oci_freq = channel_to_freq(dut, atoi(oci_chan));
+
+		if (!oci_freq) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Invalid OCIChannel number");
+			return STATUS_SENT_ERROR;
+		}
+
+		if (strcasecmp(oci_frametype, "eapolM3") == 0) {
+			snprintf(buf, sizeof(buf),
+				 "SET oci_freq_override_eapol_m3 %d", oci_freq);
+		} else if (strcasecmp(oci_frametype, "eapolG1") == 0) {
+			snprintf(buf, sizeof(buf),
+				 "SET oci_freq_override_eapol_g1 %d", oci_freq);
+		} else if (strcasecmp(oci_frametype, "SAQueryReq") == 0) {
+			snprintf(buf, sizeof(buf),
+				 "SET oci_freq_override_saquery_req %d",
+				 oci_freq);
+		} else if (strcasecmp(oci_frametype, "SAQueryResp") == 0) {
+			snprintf(buf, sizeof(buf),
+				 "SET oci_freq_override_saquery_resp %d",
+				 oci_freq);
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported OCIFrameType");
+			return STATUS_SENT_ERROR;
+		}
+		if (hapd_command(ifname, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to set oci_freq_override");
+			return STATUS_SENT_ERROR;
+		}
+		return SUCCESS_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "Transition_Disable");
+	if (val) {
+		if (atoi(val)) {
+			val = get_param(cmd, "Transition_Disable_Index");
+			if (!val) {
+				send_resp(dut, conn, SIGMA_INVALID,
+					  "errorCode,Transition_Disable without Transition_Disable_Index");
+				return STATUS_SENT;
+			}
+			dut->ap_transition_disable = 1 << atoi(val);
+		} else {
+			dut->ap_transition_disable = 0;
+		}
+
+		snprintf(buf, sizeof(buf), "SET transition_disable 0x%02x",
+			 dut->ap_transition_disable);
+		if (hapd_command(ifname, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to update transition mode disabled indication");
+			return STATUS_SENT_ERROR;
+		}
+		return SUCCESS_SEND_STATUS;
+	}
 
 	switch (get_driver_type(dut)) {
 	case DRIVER_ATHEROS:
