@@ -95,7 +95,7 @@ dpp_get_local_bootstrap(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (success)
 		*success = 0;
-	if (!bs) {
+	if (!bs){
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Missing DPPBS");
 		return STATUS_SENT_ERROR;
@@ -1036,7 +1036,7 @@ static enum sigma_cmd_result dpp_automatic_dpp(struct sigma_dut *dut,
 	int conn_status;
 	int chirp = 0;
 
-	if (!type) {
+	if(!type){
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Missing DPPActionType");
 		return STATUS_SENT_ERROR;
@@ -2411,7 +2411,7 @@ static enum sigma_cmd_result dpp_manual_dpp(struct sigma_dut *dut,
 				dut->default_timeout);
 	}
 
-	if (!bs) {
+	if(!bs){
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Missing DPPBS");
 		return STATUS_SENT_ERROR;
