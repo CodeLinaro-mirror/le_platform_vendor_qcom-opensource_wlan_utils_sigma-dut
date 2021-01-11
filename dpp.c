@@ -95,6 +95,11 @@ dpp_get_local_bootstrap(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	if (success)
 		*success = 0;
+	if (!bs) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			"errorCode, Missing DPPBS");
+		return STATUS_SENT_ERROR;
+	}
 	if (strcasecmp(bs, "QR") == 0) {
 		type = "qrcode";
 	} else if (strcasecmp(bs, "NFC") == 0) {
