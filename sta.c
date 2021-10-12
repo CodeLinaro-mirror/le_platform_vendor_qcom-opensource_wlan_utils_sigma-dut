@@ -13074,6 +13074,7 @@ cmd_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 {
 	switch (get_driver_type(dut)) {
 	case DRIVER_WCN:
+	case DRIVER_ATHEROS:
 		return wcn_sta_set_rfeature_he(intf, dut, conn, cmd);
 	default:
 		send_resp(dut, conn, SIGMA_ERROR,
@@ -13639,7 +13640,8 @@ static enum sigma_cmd_result cmd_sta_set_pwrsave(struct sigma_dut *dut,
 		 */
 		if (powersave && strcasecmp(powersave, "unscheduled") == 0)
 			res = set_ps(intf, dut, 1);
-	} else if (prog && get_driver_type(dut) == DRIVER_WCN &&
+	} else if (prog && (get_driver_type(dut) == DRIVER_WCN ||
+			    get_driver_type(dut) == DRIVER_ATHEROS) &&
 		   strcasecmp(prog, "HE") == 0) {
 		return cmd_sta_set_power_save_he(intf, dut, conn, cmd);
 	} else {
