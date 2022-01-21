@@ -4154,7 +4154,7 @@ static int send_dscp_response(struct sigma_dut *dut,
 			      struct dscp_policy_status *status_list,
 			      int num_status)
 {
-	int rem_len, ret;
+	int rem_len, ret, i;
 	char buf[200] = "", *pos, cmd[256];
 
 	pos = buf;
@@ -4169,7 +4169,7 @@ static int send_dscp_response(struct sigma_dut *dut,
 	pos += ret;
 	rem_len -= ret;
 
-	for (int i = 0; i < num_status; i++) {
+	for (i = 0; i < num_status; i++) {
 		ret = snprintf(pos, rem_len, " policy_id=%d status=%d",
 			       status_list[i].id, status_list[i].status);
 		if (snprintf_error(rem_len, ret)) {
