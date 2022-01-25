@@ -26,6 +26,7 @@
 #include <net/if.h>
 #include "wpa_ctrl.h"
 #include "wpa_helpers.h"
+#include "nl80211_copy.h"
 #ifdef ANDROID
 #include <hardware_legacy/wifi.h>
 #include <grp.h>
@@ -9721,6 +9722,9 @@ static int mac80211_get_wiphy(struct sigma_dut *dut)
 	int ret = 0;
 	int ifindex;
 
+	if (!dut->main_ifname)
+		return -1;
+
 	ifindex = if_nametoindex(dut->main_ifname);
 	if (ifindex == 0) {
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
@@ -9751,6 +9755,20 @@ static int mac80211_get_wiphy(struct sigma_dut *dut)
 				__func__, ret);
 
 	return ret;
+}
+
+
+void get_wiphy_capabilities(struct sigma_dut *dut)
+{
+	memset(&dut->hw_modes, 0, sizeof(struct dut_hw_modes));
+	if (get_driver_type(dut) == DRIVER_MAC80211 ||
+	    get_driver_type(dut) == DRIVER_LINUX_WCN) {
+		if (mac80211_get_wiphy(dut))
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"Failed to get wiphy data from the driver");
+		else
+			dut->hw_modes.valid = true;
+	}
 }
 
 #endif /* NL80211_SUPPORT */
@@ -10139,17 +10157,6 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 			dut->ap_dfs_mode = AP_DFS_MODE_ENABLED;
 	}
 
-	memset(&dut->hw_modes, 0, sizeof(struct dut_hw_modes));
-#ifdef NL80211_SUPPORT
-	if (get_driver_type(dut) == DRIVER_MAC80211 ||
-	    get_driver_type(dut) == DRIVER_LINUX_WCN) {
-		if (mac80211_get_wiphy(dut))
-			sigma_dut_print(dut, DUT_MSG_DEBUG,
-					"Failed to get wiphy data from the driver");
-		else
-			dut->hw_modes.valid = true;
-	}
-#endif /* NL80211_SUPPORT */
 
 	dut->ap_oper_chn = 0;
 
@@ -10453,10 +10460,10 @@ int open_monitor(const char *ifname);
 #endif /* __linux__ */
 
 enum send_frame_type {
-		DISASSOC, DEAUTH, SAQUERY
+		DISASSOC, DEAUTH, SAQUERY, CHANNEL_SWITCH
 };
 enum send_frame_protection {
-	CORRECT_KEY, INCORRECT_KEY, UNPROTECTED
+	PROTECTION_NOT_SET, CORRECT_KEY, INCORRECT_KEY, UNPROTECTED
 };
 
 
@@ -10527,6 +10534,8 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 	case SAQUERY:
 		*pos++ = 0xd0;
 		break;
+	default:
+		return -1;
 	}
 
 	if (protected == INCORRECT_KEY)
@@ -10603,6 +10612,8 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 			*pos++ = 0x12;
 			*pos++ = 0x34;
 			break;
+		default:
+			return -1;
 		}
 	}
 
@@ -11216,8 +11227,10 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 	/* const char *ifname = get_param(cmd, "INTERFACE"); */
 	const char *val;
 	enum send_frame_type frame;
-	enum send_frame_protection protected;
+	enum send_frame_protection protected = PROTECTION_NOT_SET;
 	char buf[100];
+	unsigned int freq;
+	unsigned int chan;
 
 	val = get_param(cmd, "Program");
 	if (val) {
@@ -11248,6 +11261,8 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 		frame = DEAUTH;
 	else if (strcasecmp(val, "saquery") == 0)
 		frame = SAQUERY;
+	else if (strcasecmp(val, "ChannelSwitchAnncment") == 0)
+		frame = CHANNEL_SWITCH;
 	else {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Unsupported "
 			  "PMFFrameType");
@@ -11257,27 +11272,25 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 	val = get_param(cmd, "PMFProtected");
 	if (val == NULL)
 		val = get_param(cmd, "Protected");
-	if (val == NULL)
-		return -1;
-	if (strcasecmp(val, "Correct-key") == 0 ||
-	    strcasecmp(val, "CorrectKey") == 0)
-		protected = CORRECT_KEY;
-	else if (strcasecmp(val, "IncorrectKey") == 0)
-		protected = INCORRECT_KEY;
-	else if (strcasecmp(val, "Unprotected") == 0)
-		protected = UNPROTECTED;
-	else {
-		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Unsupported "
-			  "PMFProtected");
-		return 0;
+	if (val) {
+		if (strcasecmp(val, "Correct-key") == 0 ||
+		    strcasecmp(val, "CorrectKey") == 0)
+			protected = CORRECT_KEY;
+		else if (strcasecmp(val, "IncorrectKey") == 0)
+			protected = INCORRECT_KEY;
+		else if (strcasecmp(val, "Unprotected") == 0)
+			protected = UNPROTECTED;
+		else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported PMFProtected");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	val = get_param(cmd, "stationID");
-	if (val == NULL)
-		return -1;
 
-	if (protected == INCORRECT_KEY ||
-	    (protected == UNPROTECTED && frame == SAQUERY))
+	if (val && (protected == INCORRECT_KEY ||
+		    (protected == UNPROTECTED && frame == SAQUERY)))
 		return ap_inject_frame(dut, conn, frame, protected, val);
 
 	switch (frame) {
@@ -11291,6 +11304,19 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 		break;
 	case SAQUERY:
 		snprintf(buf, sizeof(buf), "sa_query %s", val);
+		break;
+	case CHANNEL_SWITCH:
+		val = get_param(cmd, "channel");
+		if (!val)
+			return -1;
+		chan = atoi(val);
+		freq = channel_to_freq(dut, chan);
+		if (!freq) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid channel: %d", chan);
+			return INVALID_SEND_STATUS;
+		}
+		snprintf(buf, sizeof(buf), "chan_switch 5 %d", freq);
 		break;
 	}
 
@@ -13580,22 +13606,34 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	val = get_param(cmd, "GI");
 	if (val) {
 		int fix_rate_sgi;
+		u8 he_gi_val;
+		u8 auto_rate_gi;
 
 		if (strcmp(val, "0.8") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 9");
 			fix_rate_sgi = 1;
+			auto_rate_gi = 9;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_0_8;
 		} else if (strcmp(val, "1.6") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 10");
 			fix_rate_sgi = 2;
+			auto_rate_gi = 10;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_1_6;
 		} else if (strcmp(val, "3.2") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 11");
 			fix_rate_sgi = 3;
+			auto_rate_gi = 11;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_3_2;
 		} else {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,GI value not supported");
 			return STATUS_SENT_ERROR;
 		}
-		run_iwpriv(dut, ifname, "enable_short_gi %d", fix_rate_sgi);
+		if (wcn_set_he_gi(dut, ifname, he_gi_val)) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"wcn_set_he_gi failed, using iwpriv");
+			run_iwpriv(dut, ifname, "enable_short_gi %d",
+				   auto_rate_gi);
+			run_iwpriv(dut, ifname, "enable_short_gi %d",
+				   fix_rate_sgi);
+		}
 	}
 
 	val = get_param(cmd, "LTF");
