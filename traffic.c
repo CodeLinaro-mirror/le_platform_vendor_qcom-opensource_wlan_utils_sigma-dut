@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <ctype.h>
+#include <ifaddrs.h>
 
 #include "wpa_helpers.h"
 
@@ -38,6 +39,7 @@ static enum sigma_cmd_result cmd_traffic_send_ping(struct sigma_dut *dut,
 	int type = 1;
 	int dscp = 0, use_dscp = 0;
 	char extra[100], int_arg[100], intf_arg[100], ip_dst[100], ping[100];
+	struct in6_addr ip6_addr;
 
 	val = get_param(cmd, "Type");
 	if (!val)
@@ -57,6 +59,18 @@ static enum sigma_cmd_result cmd_traffic_send_ping(struct sigma_dut *dut,
 	if (dut->ndp_enable && type == 2) {
 		snprintf(ip_dst, sizeof(ip_dst), "%s%%nan0", dst);
 		dst = ip_dst;
+	} else if (type == 2) {
+		if (inet_pton(AF_INET6, dst, &ip6_addr) <= 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Unsupported address type");
+			return STATUS_SENT;
+		}
+
+		if (IN6_IS_ADDR_LINKLOCAL(&ip6_addr)) {
+			snprintf(ip_dst, sizeof(ip_dst), "%s%%%s", dst,
+				 get_station_ifname(dut));
+			dst = ip_dst;
+		}
 	}
 
 	val = get_param(cmd, "frameSize");
@@ -244,6 +258,51 @@ static enum sigma_cmd_result cmd_traffic_stop_ping(struct sigma_dut *dut,
 }
 
 
+static int get_ip_addr(const char *ifname, int ipv6, char *buf, size_t len)
+{
+	struct ifaddrs *ifa, *ifa_tmp;
+	bool non_ll_addr_found = false;
+
+	if (getifaddrs(&ifa) == -1)
+		return -1;
+
+	for (ifa_tmp = ifa; ifa_tmp; ifa_tmp = ifa_tmp->ifa_next) {
+		if (!ifa_tmp->ifa_addr ||
+		    strcasecmp(ifname, ifa_tmp->ifa_name) != 0)
+			continue;
+
+		if (!ipv6 && ifa_tmp->ifa_addr->sa_family == AF_INET) {
+			struct sockaddr_in *in;
+
+			in = (struct sockaddr_in *) ifa_tmp->ifa_addr;
+			if (!inet_ntop(AF_INET, &in->sin_addr, buf, len))
+				return -1;
+			return 0;
+		}
+
+		if (ipv6 && ifa_tmp->ifa_addr->sa_family == AF_INET6) {
+			struct sockaddr_in6 *in6;
+
+			in6 = (struct sockaddr_in6 *) ifa_tmp->ifa_addr;
+
+			/* get link local address if available */
+			if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr)) {
+				if (!inet_ntop(AF_INET6, &in6->sin6_addr, buf,
+					       len))
+					return -1;
+				return 0;
+			}
+
+			if (!non_ll_addr_found &&
+			    inet_ntop(AF_INET6, &in6->sin6_addr, buf, len))
+				non_ll_addr_found = true;
+		}
+	}
+
+	return non_ll_addr_found ? 0 : -1;
+}
+
+
 static enum sigma_cmd_result cmd_traffic_start_iperf(struct sigma_dut *dut,
 						     struct sigma_conn *conn,
 						     struct sigma_cmd *cmd)
@@ -257,6 +316,9 @@ static enum sigma_cmd_result cmd_traffic_start_iperf(struct sigma_dut *dut,
 	char port_str[20], iperf[100];
 	FILE *f;
 	int server, ipv6 = 0;
+	char *pos;
+	int dscp, reverse = 0;
+	char tos[20], client_port_str[100];
 
 	val = get_param(cmd, "mode");
 	if (!val) {
@@ -269,7 +331,8 @@ static enum sigma_cmd_result cmd_traffic_start_iperf(struct sigma_dut *dut,
 	iptype = "";
 	val = get_param(cmd, "iptype");
 	if (val) {
-		if (strcasecmp(val, "ipv6") == 0) {
+		if (strcasecmp(val, "ipv6") == 0 ||
+		    strcasecmp(val, "version6") == 0) {
 			iptype = "-6";
 			ipv6 = 1;
 		} else {
@@ -291,22 +354,67 @@ static enum sigma_cmd_result cmd_traffic_start_iperf(struct sigma_dut *dut,
 		proto = "-u";
 
 	dst = get_param(cmd, "destination");
+	pos = dst ? strchr(dst, '%') : NULL;
+	if (pos) {
+		*pos++ = '\0';
+		ifname = pos;
+	} else if (dut->ndpe) {
+		ifname = "nan0";
+	} else {
+		ifname = get_station_ifname(dut);
+	}
+
 	if (!server && (!dst || (!is_ip_addr(dst) && !is_ipv6_addr(dst)))) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Invalid destination address");
 		return STATUS_SENT;
 	}
 
-	if (dut->ndpe)
-		ifname = "nan0";
-	else
-		ifname = get_station_ifname(dut);
-
 	val = get_param(cmd, "duration");
 	if (val)
 		duration = atoi(val);
 	else
 		duration = 0;
+
+	client_port_str[0] = '\0';
+	val = get_param(cmd, "clientport");
+	if (val) {
+		char ipaddr[100];
+		int res;
+
+		port = atoi(val);
+		if (get_ip_addr(ifname, ipv6, ipaddr, sizeof(ipaddr))) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				"errorCode,Cannot get own IP address");
+			return STATUS_SENT;
+		}
+
+		if (ipv6)
+			snprintf(buf, sizeof(buf), "%s%%%s", ipaddr, ifname);
+		else
+			snprintf(buf, sizeof(buf), "%s", ipaddr);
+
+		res = snprintf(client_port_str, sizeof(client_port_str),
+			       " -B %s --cport %d", buf, port);
+		if (res < 0 || res >= sizeof(client_port_str))
+			return ERROR_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "reverse");
+	if (val)
+		reverse = atoi(val);
+
+	tos[0] = '\0';
+	val = get_param(cmd, "DSCP");
+	if (val) {
+		dscp = atoi(val);
+		if (dscp < 0 || dscp > 63) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Invalid DSCP value");
+			return STATUS_SENT_ERROR;
+		}
+		snprintf(tos, sizeof(tos), " -S 0x%02x", dscp << 2);
+	}
 
 	unlink(concat_sigma_tmpdir(dut, "/sigma_dut-iperf", iperf,
 				   sizeof(iperf)));
@@ -337,10 +445,11 @@ static enum sigma_cmd_result cmd_traffic_start_iperf(struct sigma_dut *dut,
 		else
 			snprintf(buf, sizeof(buf), "%s", dst);
 		fprintf(f, "#!" SHELL "\n"
-			"iperf3 -c %s -t %d %s %s %s > %s"
+			"iperf3 -c %s -t %d %s %s %s%s%s%s > %s"
 			"/sigma_dut-iperf &\n"
 			"echo $! > %s/sigma_dut-iperf-pid\n",
 			buf, duration, iptype, proto, port_str,
+			client_port_str, tos, reverse ? " -R" : "",
 			dut->sigma_tmpdir, dut->sigma_tmpdir);
 	}
 
