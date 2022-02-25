@@ -2,7 +2,7 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2019, The Linux Foundation
+ * Copyright (c) 2018-2021, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -363,6 +363,23 @@ const char * get_param_indexed(struct sigma_cmd *cmd, const char *name,
 	}
 
 	return NULL;
+}
+
+
+const char * get_param_fmt(struct sigma_cmd *cmd, const char *name, ...)
+{
+	va_list ap;
+	char buf[100];
+	int ret;
+
+	va_start(ap, name);
+	ret = vsnprintf(buf, sizeof(buf), name, ap);
+	va_end(ap);
+
+	if (ret < 0 || ret >= sizeof(buf))
+		return NULL;
+
+	return get_param(cmd, buf);
 }
 
 
@@ -836,6 +853,13 @@ static void set_defaults(struct sigma_dut *dut)
 	dut->write_stats = 1;
 	dut->priv_cmd = "iwpriv";
 	dut->sigma_tmpdir = SIGMA_TMPDIR;
+	dut->ap_ocvc = -1;
+	dut->user_config_ap_ocvc = -1;
+	dut->ap_sae_commit_status = -1;
+	dut->sta_async_twt_supp = -1;
+#ifdef ANDROID
+	dut->dscp_use_iptables = 1;
+#endif /* ANDROID */
 }
 
 
@@ -855,6 +879,12 @@ static void deinit_sigma_dut(struct sigma_dut *dut)
 	dut->dpp_peer_uri = NULL;
 	free(dut->ap_sae_passwords);
 	dut->ap_sae_passwords = NULL;
+	free(dut->ap_sae_pk_modifier);
+	dut->ap_sae_pk_modifier = NULL;
+	free(dut->ap_sae_pk_keypair);
+	dut->ap_sae_pk_keypair = NULL;
+	free(dut->ap_sae_pk_keypair_sig);
+	dut->ap_sae_pk_keypair_sig = NULL;
 	free(dut->ar_ltf);
 	dut->ar_ltf = NULL;
 	free(dut->ap_dpp_conf_addr);
@@ -875,6 +905,8 @@ static void deinit_sigma_dut(struct sigma_dut *dut)
 	dut->station_ifname_2g = NULL;
 	free(dut->station_ifname_5g);
 	dut->station_ifname_5g = NULL;
+	stop_dscp_policy_mon_thread(dut);
+	free_dscp_policy_table(dut);
 }
 
 
@@ -922,7 +954,7 @@ static const char * const license1 =
 "\n"
 "Copyright (c) 2010-2011, Atheros Communications, Inc.\n"
 "Copyright (c) 2011-2017, Qualcomm Atheros, Inc.\n"
-"Copyright (c) 2018-2019, The Linux Foundation\n"
+"Copyright (c) 2018-2021, The Linux Foundation\n"
 "All Rights Reserved.\n"
 "Licensed under the Clear BSD license.\n"
 "\n";
@@ -967,7 +999,7 @@ static void print_license(void)
 
 static void usage(void)
 {
-	printf("usage: sigma_dut [-aABdfGqQDIntuVW23] [-p<port>] "
+	printf("usage: sigma_dut [-aABdfGqQDIntuVW234] [-p<port>] "
 	       "[-s<sniffer>] [-m<set_maccaddr.sh>] \\\n"
 	       "       [-M<main ifname>] [-R<radio ifname>] "
 	       "[-S<station ifname>] [-P<p2p_ifname>]\\\n"
@@ -996,7 +1028,9 @@ static void usage(void)
 	       "       [-z <client socket directory path \\\n"
 	       "       Ex: </data/vendor/wifi/sockets>] \\\n"
 	       "       [-Z <Override default tmp dir path>] \\\n"
-	       "       [-r <HT40 or 2.4_HT40>]\n");
+	       "       [-5 <WFD timeout override>] \\\n"
+	       "       [-r <HT40 or 2.4_HT40>] \\\n"
+	       "       [-6 <ocv or bp or ocv_bp>]\n");
 	printf("local command: sigma_dut [-p<port>] <-l<cmd>>\n");
 }
 
@@ -1019,7 +1053,7 @@ int main(int argc, char *argv[])
 
 	for (;;) {
 		c = getopt(argc, argv,
-			   "aAb:Bc:C:dDE:e:fF:gGhH:j:J:i:Ik:K:l:L:m:M:nN:o:O:p:P:qQr:R:s:S:tT:uv:VWw:x:y:z:Z:23");
+			   "aAb:Bc:C:dDE:e:fF:gGhH:j:J:i:Ik:K:l:L:m:M:nN:o:O:p:P:qQr:R:s:S:tT:uv:VWw:x:y:z:Z:2345:6:");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -1223,6 +1257,37 @@ int main(int argc, char *argv[])
 		case '3':
 			sigma_dut.owe_ptk_workaround = 1;
 			break;
+		case '4':
+			sigma_dut.client_privacy_default = 1;
+			break;
+		case '5': {
+			int timeout;
+
+			errno = 0;
+			timeout = strtol(optarg, NULL, 10);
+			if (errno || timeout < 0) {
+				sigma_dut_print(&sigma_dut, DUT_MSG_ERROR,
+					       "failed to set default_timeout");
+				return -1;
+			}
+			sigma_dut_print(&sigma_dut, DUT_MSG_INFO,
+					"default timeout set to %d", timeout);
+			sigma_dut.user_config_timeout = timeout;
+			break;
+		}
+		case '6':
+			if (strcmp(optarg, "ocv") == 0) {
+				sigma_dut.user_config_ap_ocvc = 1;
+			} else if (strcmp(optarg, "bp") == 0) {
+				sigma_dut.user_config_ap_beacon_prot = 1;
+			} else if (strcmp(optarg, "ocv_bp") == 0) {
+				sigma_dut.user_config_ap_beacon_prot = 1;
+				sigma_dut.user_config_ap_ocvc = 1;
+			} else {
+				printf("Unsupported -6 value\n");
+				exit(1);
+			}
+			break;
 		case 'h':
 		default:
 			usage();
@@ -1248,8 +1313,16 @@ int main(int argc, char *argv[])
 	if (get_openwrt_driver_type() == OPENWRT_DRIVER_ATHEROS)
 		get_nl80211_config_enable_option(&sigma_dut);
 
+	sigma_dut_get_device_driver_name(get_main_ifname(&sigma_dut),
+					 sigma_dut.device_driver,
+					 sizeof(sigma_dut.device_driver));
+	if (sigma_dut.device_driver[0])
+		sigma_dut_print(&sigma_dut, DUT_MSG_DEBUG, "device driver: %s",
+				sigma_dut.device_driver);
+
 #ifdef NL80211_SUPPORT
 	sigma_dut.nl_ctx = nl80211_init(&sigma_dut);
+	get_wiphy_capabilities(&sigma_dut);
 #endif /* NL80211_SUPPORT */
 	sigma_dut_register_cmds();
 
