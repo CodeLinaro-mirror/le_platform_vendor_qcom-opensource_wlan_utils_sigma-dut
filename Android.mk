@@ -32,11 +32,6 @@ endif
 ### MIRACAST ###
 OBJS += miracast.c
 CFLAGS += -DMIRACAST
-dhcpver = $(filter N%,$(PLATFORM_VERSION))
-dhcpver += $(filter 7.%,$(PLATFORM_VERSION))
-ifeq (,$(strip $(dhcpver)))
- CFLAGS += -DMIRACAST_DHCP_M
-endif
 CFLAGS += -DCONFIG_CTRL_IFACE_CLIENT_DIR=\"/data/misc/wifi/sockets\"
 CFLAGS += -DSIGMA_TMPDIR=\"/data\"
 
@@ -47,15 +42,15 @@ FRAMEWORK_GIT_VER := $(shell cd $(ANDROID_BUILD_TOP/)frameworks/base && git desc
 SIGMA_GIT_VER := $(shell cd $(LOCAL_PATH) && git describe --dirty=+)
 ifeq ($(SIGMA_GIT_VER),)
 ifeq ($(FRAMEWORK_GIT_VER),)
-SIGMA_VER = android-$(PLATFORM_VERSION)-$(TARGET_PRODUCT)-$(BUILD_ID)
+SIGMA_VER := android-$(PLATFORM_VERSION)-$(TARGET_BOARD_PLATFORM)-$(BUILD_ID)
 else
-SIGMA_VER = framework-$(FRAMEWORK_VER)
+SIGMA_VER := framework-$(FRAMEWORK_VER)
 endif
 else
 ifeq ($(FRAMEWORK_GIT_VER),)
-SIGMA_VER = android-$(PLATFORM_VERSION)-$(TARGET_PRODUCT)-$(BUILD_ID)-sigma-$(SIGMA_GIT_VER)
+SIGMA_VER := android-$(PLATFORM_VERSION)-$(TARGET_BOARD_PLATFORM)-$(BUILD_ID)-sigma-$(SIGMA_GIT_VER)
 else
-SIGMA_VER = framework-$(FRAMEWORK_GIT_VER)-sigma-$(SIGMA_GIT_VER)
+SIGMA_VER := framework-$(FRAMEWORK_GIT_VER)-sigma-$(SIGMA_GIT_VER)
 endif
 endif
 CFLAGS += -DSIGMA_DUT_VER=\"$(SIGMA_VER)\"
@@ -78,17 +73,19 @@ LOCAL_C_INCLUDES += \
 	$(LOCAL_PATH) external/libnl/include
 
 LOCAL_SHARED_LIBRARIES := libc libcutils libnl
-LOCAL_STATIC_LIBRARIES := libpcap
-ifneq (,$(strip $(dhcpver)))
+
+ifneq ($(BUILD_QEMU_IMAGES),true)
+LOCAL_STATIC_LIBRARIES := libpcap.vendor
+endif
 LOCAL_SHARED_LIBRARIES += libnetutils
 LOCAL_C_INCLUDES += $(LOCAL_PATH) system/core/include/netutils
-endif
 LOCAL_SHARED_LIBRARIES += libhardware_legacy
 ifeq ($(BOARD_WLAN_DEVICE),qcwcn)
 ifneq ($(wildcard hardware/qcom/wlan/qcwcn/wifi_hal/nan_cert.h),)
 LOCAL_SHARED_LIBRARIES += libwifi-hal-qcom
 OBJS += nan.c
 CFLAGS += -DANDROID_NAN
+CFLAGS += -DANDROID_WIFI_HAL
 endif
 endif
 CFLAGS += -Wno-unused-parameter
@@ -108,5 +105,6 @@ include $(BUILD_EXECUTABLE)
 include $(CLEAR_VARS)
 LOCAL_SRC_FILES:= e_loop.c
 LOCAL_MODULE := e_loop
+LOCAL_VENDOR_MODULE := true
 LOCAL_CFLAGS := -DWITHOUT_IFADDRS -Wno-sign-compare
 include $(BUILD_EXECUTABLE)
