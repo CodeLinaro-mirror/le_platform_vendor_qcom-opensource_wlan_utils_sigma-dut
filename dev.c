@@ -1,7 +1,7 @@
 /*
  * Sigma Control API DUT (station/AP/sniffer)
  * Copyright (c) 2011-2013, 2017, Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2019, The Linux Foundation
+ * Copyright (c) 2018-2020, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -12,6 +12,9 @@
 #include <sys/wait.h>
 #include "wpa_ctrl.h"
 #include "wpa_helpers.h"
+
+
+extern char *sigma_cert_path;
 
 
 static enum sigma_cmd_result cmd_dev_send_frame(struct sigma_dut *dut,
@@ -67,11 +70,263 @@ static enum sigma_cmd_result cmd_dev_set_parameter(struct sigma_dut *dut,
 }
 
 
+static enum sigma_cmd_result sta_server_cert_trust(struct sigma_dut *dut,
+						   struct sigma_conn *conn,
+						   const char *val)
+{
+	char buf[200];
+	struct wpa_ctrl *ctrl = NULL;
+	int e;
+	char resp[200];
+	int num_disconnected = 0;
+	int tod = -1;
+
+	strlcpy(resp, "ServerCertTrustResult,Accepted", sizeof(resp));
+
+	if (strcasecmp(val, "Accept") != 0 && strcasecmp(val, "Reject") != 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Unknown ServerCertTrust value '%s'", val);
+		return INVALID_SEND_STATUS;
+	}
+
+	snprintf(buf, sizeof(buf), "%s/uosc-disabled", sigma_cert_path);
+	if (file_exists(buf)) {
+		strlcpy(resp,
+			"ServerCertTrustResult,OverrideNotAllowed,Reason,UOSC disabled on device",
+			sizeof(resp));
+		goto done;
+	}
+
+	if (!dut->server_cert_hash[0]) {
+		strlcpy(resp,
+			"ServerCertTrustResult,OverrideNotAllowed,Reason,No server certificate stored",
+			sizeof(resp));
+		goto done;
+	}
+
+	if (dut->sta_tod_policy) {
+		strlcpy(resp,
+			"ServerCertTrustResult,OverrideNotAllowed,Reason,TOD policy",
+			sizeof(resp));
+		goto done;
+	}
+
+	if (dut->server_cert_tod == 1) {
+		strlcpy(resp,
+			"ServerCertTrustResult,OverrideNotAllowed,Reason,TOD-STRICT policy in received server certificate",
+			sizeof(resp));
+		goto done;
+	}
+
+	if (strcasecmp(val, "Accept") != 0) {
+		strlcpy(resp, "ServerCertTrustResult,Rejected", sizeof(resp));
+		goto done;
+	}
+
+	snprintf(buf, sizeof(buf), "hash://server/sha256/%s",
+		 dut->server_cert_hash);
+	if (set_network_quoted(get_station_ifname(dut), dut->infra_network_id,
+			       "ca_cert", buf) < 0) {
+		strlcpy(resp,
+			"ServerCertTrustResult,OverrideNotAllowed,Reason,Could not configure server certificate hash for the network profile",
+			sizeof(resp));
+		goto done;
+	}
+
+	if (set_network(get_station_ifname(dut), dut->infra_network_id,
+			"domain_match", "NULL") < 0 ||
+	    set_network(get_station_ifname(dut), dut->infra_network_id,
+			"domain_suffix_match", "NULL") < 0) {
+		strlcpy(resp,
+			"ServerCertTrustResult,OverrideNotAllowed,Reason,Could not clear domain matching rules",
+			sizeof(resp));
+		goto done;
+	}
+
+	wpa_command(get_station_ifname(dut), "DISCONNECT");
+	snprintf(buf, sizeof(buf), "SELECT_NETWORK %d", dut->infra_network_id);
+	if (wpa_command(get_station_ifname(dut), buf) < 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO, "Failed to select "
+				"network id %d on %s",
+				dut->infra_network_id,
+				get_station_ifname(dut));
+		strlcpy(resp,
+			"ServerCertTrustResult,Accepted,Result,Could not request reconnection",
+			sizeof(resp));
+		goto done;
+	}
+
+	ctrl = open_wpa_mon(get_station_ifname(dut));
+	if (!ctrl)
+		goto done;
+
+	for (e = 0; e < 20; e++) {
+		const char *events[] = {
+			"CTRL-EVENT-EAP-PEER-CERT",
+			"CTRL-EVENT-EAP-TLS-CERT-ERROR",
+			"CTRL-EVENT-DISCONNECTED",
+			"CTRL-EVENT-CONNECTED",
+			NULL
+		};
+		char buf[1024];
+		int res;
+
+		res = get_wpa_cli_events(dut, ctrl, events, buf, sizeof(buf));
+		if (res < 0) {
+			strlcpy(resp,
+				"ServerCertTrustResult,Accepted,Result,Association did not complete",
+				sizeof(resp));
+			goto done;
+		}
+		sigma_dut_print(dut, DUT_MSG_DEBUG, "Connection event: %s",
+				buf);
+
+
+		if (strstr(buf, "CTRL-EVENT-EAP-PEER-CERT") &&
+		    strstr(buf, " depth=0")) {
+			char *pos = strstr(buf, " hash=");
+
+			if (pos) {
+				if (strstr(buf, " tod=1"))
+					tod = 1;
+				else if (strstr(buf, " tod=2"))
+					tod = 2;
+				else
+					tod = 0;
+				sigma_dut_print(dut, DUT_MSG_DEBUG,
+						"Server certificate TOD policy: %d",
+						tod);
+				dut->server_cert_tod = tod;
+			}
+		}
+
+		if (strstr(buf, "CTRL-EVENT-EAP-TLS-CERT-ERROR")) {
+			strlcpy(resp,
+				"ServerCertTrustResult,Accepted,Result,TLS server certificate validation failed with updated profile",
+				sizeof(resp));
+			goto done;
+		}
+
+		if (strstr(buf, "CTRL-EVENT-DISCONNECTED")) {
+			num_disconnected++;
+
+			if (num_disconnected > 2) {
+				strlcpy(resp,
+					"ServerCertTrustResult,Accepted,Result,Connection failed",
+					sizeof(resp));
+				goto done;
+			}
+		}
+
+		if (strstr(buf, "CTRL-EVENT-CONNECTED")) {
+			if (tod >= 0) {
+				sigma_dut_print(dut, DUT_MSG_DEBUG,
+						"Network profile TOD policy update: %d -> %d",
+						dut->sta_tod_policy, tod);
+				dut->sta_tod_policy = tod;
+			}
+			strlcpy(resp,
+				"ServerCertTrustResult,Accepted,Result,Connected",
+				sizeof(resp));
+			break;
+		}
+	}
+
+done:
+	if (ctrl) {
+		wpa_ctrl_detach(ctrl);
+		wpa_ctrl_close(ctrl);
+	}
+
+	send_resp(dut, conn, SIGMA_COMPLETE, resp);
+	return STATUS_SENT;
+}
+
+
+static enum sigma_cmd_result dev_exec_key_rotation(struct sigma_dut *dut,
+						   struct sigma_conn *conn,
+						   struct sigma_cmd *cmd)
+{
+	if (dut->mode == SIGMA_MODE_AP ||
+	    dut->mode == SIGMA_MODE_UNKNOWN) {
+		const char *ifname;
+
+		ifname = get_hostapd_ifname(dut);
+		if (hapd_command(ifname, "REKEY_GTK") < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to request hostapd to rekey GTK");
+			return STATUS_SENT_ERROR;
+		}
+		return SUCCESS_SEND_STATUS;
+	} else if (dut->mode == SIGMA_MODE_STATION) {
+		const char *intf = get_param(cmd, "Interface");
+
+		if (!intf)
+			intf = get_main_ifname(dut);
+		if (wpa_command(intf, "KEY_REQUEST 0 0") != 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to request wpa_supplicant to request AP to rekey GTK");
+			return STATUS_SENT_ERROR;
+		}
+		return SUCCESS_SEND_STATUS;
+	} else {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Unsupported mode for KeyRotation,1");
+		return STATUS_SENT_ERROR;
+	}
+}
+
+
+static enum sigma_cmd_result wpa3_dev_exec_action(struct sigma_dut *dut,
+						  struct sigma_conn *conn,
+						  struct sigma_cmd *cmd)
+{
+	const char *val;
+	char buf[4000], buf2[100], *pos, *end;
+
+	val = get_param(cmd, "Rejected_DH_Groups");
+	if (val) {
+		val = get_param(cmd, "Dest_MAC");
+		if (!val)
+			return ERROR_SEND_STATUS;
+		snprintf(buf2, sizeof(buf2), "STA %s", val);
+		if (wpa_command_resp(dut->hostapd_ifname, buf2,
+				     buf, sizeof(buf)) < 0)
+			return ERROR_SEND_STATUS;
+		pos = buf;
+		while (pos) {
+			if (strncmp(pos, "sae_rejected_groups=", 20) == 0)
+				break;
+			pos = strchr(pos, '\n');
+			if (pos)
+				pos++;
+		}
+		if (pos) {
+			pos += 20;
+			end = strchr(pos, '\n');
+			if (end)
+				*end = '\0';
+		}
+		snprintf(buf2, sizeof(buf2), "DHGroupVerResult,%s",
+			 pos ? pos : "");
+		send_resp(dut, conn, SIGMA_COMPLETE, buf2);
+		return STATUS_SENT;
+	}
+
+	val = get_param(cmd, "KeyRotation");
+	if (val && atoi(val) == 1)
+		return dev_exec_key_rotation(dut, conn, cmd);
+
+	return ERROR_SEND_STATUS;
+}
+
+
 static enum sigma_cmd_result cmd_dev_exec_action(struct sigma_dut *dut,
 						 struct sigma_conn *conn,
 						 struct sigma_cmd *cmd)
 {
 	const char *program = get_param(cmd, "Program");
+	const char *val;
 
 #ifdef MIRACAST
 	if (program && (strcasecmp(program, "WFD") == 0 ||
@@ -84,6 +339,13 @@ static enum sigma_cmd_result cmd_dev_exec_action(struct sigma_dut *dut,
 
 	if (program && strcasecmp(program, "DPP") == 0)
 		return dpp_dev_exec_action(dut, conn, cmd);
+
+	val = get_param(cmd, "ServerCertTrust");
+	if (val)
+		return sta_server_cert_trust(dut, conn, val);
+
+	if (program && strcasecmp(program, "WPA3") == 0)
+		return wpa3_dev_exec_action(dut, conn, cmd);
 
 	return ERROR_SEND_STATUS;
 }
@@ -222,10 +484,11 @@ static int is_runtime_id_valid(struct sigma_dut *dut, const char *val)
 static int build_log_dir(struct sigma_dut *dut, char *dir, size_t dir_size)
 {
 	int res;
-	const char *vendor;
+	const char *vendor = dut->vendor_name;
 	int i;
 
-	vendor = dut->vendor_name ? dut->vendor_name : "Qualcomm";
+	if (!vendor)
+		return -1;
 
 	if (dut->log_file_dir) {
 		res = snprintf(dir, dir_size, "%s/%s", dut->log_file_dir,
@@ -277,6 +540,12 @@ static enum sigma_cmd_result cmd_dev_start_test(struct sigma_dut *dut,
 	val = get_param(cmd, "Runtime_ID");
 	if (!(val && is_runtime_id_valid(dut, val)))
 		return INVALID_SEND_STATUS;
+
+	if (!dut->vendor_name) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Log collection not supported without vendor name specified on the command line (-N)");
+		return SUCCESS_SEND_STATUS;
+	}
 
 	if (build_log_dir(dut, dir, sizeof(dir)) < 0)
 		return ERROR_SEND_STATUS;
@@ -471,6 +740,12 @@ static enum sigma_cmd_result cmd_dev_stop_test(struct sigma_dut *dut,
 	char dir[200];
 	int res;
 
+	if (!dut->vendor_name) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Log collection not supported without vendor name specified on the command line (-N)");
+		return SUCCESS_SEND_STATUS;
+	}
+
 	val = get_param(cmd, "Runtime_ID");
 	if (!val || strcmp(val, dut->dev_start_test_runtime_id) != 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Invalid runtime id");
@@ -494,7 +769,7 @@ static enum sigma_cmd_result cmd_dev_stop_test(struct sigma_dut *dut,
 #endif /* ANDROID */
 
 	res = snprintf(out_file, sizeof(out_file), "%s_%s_%s.tar.gz",
-		       dut->vendor_name ? dut->vendor_name : "Qualcomm",
+		       dut->vendor_name,
 		       dut->model_name ? dut->model_name : "Unknown",
 		       dut->dev_start_test_runtime_id);
 	if (res < 0 || res >= sizeof(out_file))
