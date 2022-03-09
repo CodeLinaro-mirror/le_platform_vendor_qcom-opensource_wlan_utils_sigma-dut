@@ -2,7 +2,7 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2014, 2016, Qualcomm Atheros, Inc.
- * Copyright (c) 2018, The Linux Foundation
+ * Copyright (c) 2018-2021, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -15,21 +15,23 @@
 
 #define DEFAULT_HAPD_CTRL_PATH "/var/run/hostapd/"
 
-extern char *sigma_main_ifname;
-extern char *sigma_station_ifname;
-extern char *sigma_p2p_ifname;
 extern char *sigma_wpas_ctrl;
 extern char *client_socket_path;
 extern char *sigma_hapd_ctrl;
 
 
-char * get_main_ifname(void)
+const char * get_main_ifname(struct sigma_dut *dut)
 {
-	enum driver_type drv = get_driver_type();
+	enum driver_type drv = get_driver_type(dut);
 	enum openwrt_driver_type openwrt_drv = get_openwrt_driver_type();
 
-	if (sigma_main_ifname)
-		return sigma_main_ifname;
+	if (dut->main_ifname) {
+		if (dut->use_5g && dut->main_ifname_5g)
+			return dut->main_ifname_5g;
+		if (!dut->use_5g && dut->main_ifname_2g)
+			return dut->main_ifname_2g;
+		return dut->main_ifname;
+	}
 
 	if (drv == DRIVER_ATHEROS || openwrt_drv == OPENWRT_DRIVER_ATHEROS) {
 		if (if_nametoindex("ath2") > 0)
@@ -61,10 +63,15 @@ char * get_main_ifname(void)
 }
 
 
-char * get_station_ifname(void)
+const char * get_station_ifname(struct sigma_dut *dut)
 {
-	if (sigma_station_ifname)
-		return sigma_station_ifname;
+	if (dut->station_ifname) {
+		if (dut->use_5g && dut->station_ifname_5g)
+			return dut->station_ifname_5g;
+		if (!dut->use_5g && dut->station_ifname_2g)
+			return dut->station_ifname_2g;
+		return dut->station_ifname;
+	}
 
 	/*
 	 * If we have both wlan0 and wlan1, assume the first one is the station
@@ -81,22 +88,22 @@ char * get_station_ifname(void)
 }
 
 
-const char * get_p2p_ifname(const char *primary_ifname)
+const char * get_p2p_ifname(struct sigma_dut *dut, const char *primary_ifname)
 {
-	if (strcmp(get_station_ifname(), primary_ifname) != 0)
+	if (strcmp(get_station_ifname(dut), primary_ifname) != 0)
 		return primary_ifname;
 
-	if (sigma_p2p_ifname)
-		return sigma_p2p_ifname;
+	if (dut->p2p_ifname)
+		return dut->p2p_ifname;
 
-	return get_station_ifname();
+	return get_station_ifname(dut);
 }
 
 
 void dut_ifc_reset(struct sigma_dut *dut)
 {
 	char buf[256];
-	char *ifc = get_station_ifname();
+	const char *ifc = get_station_ifname(dut);
 
 	snprintf(buf, sizeof(buf), "ifconfig %s down", ifc);
 	run_system(dut, buf);
@@ -228,8 +235,9 @@ struct wpa_ctrl * open_hapd_mon(const char *ifname)
 }
 
 
-int get_wpa_cli_events(struct sigma_dut *dut, struct wpa_ctrl *mon,
-		       const char **events, char *buf, size_t buf_size)
+int get_wpa_cli_events_timeout(struct sigma_dut *dut, struct wpa_ctrl *mon,
+			       const char **events, char *buf, size_t buf_size,
+			       unsigned int timeout)
 {
 	int fd, ret;
 	fd_set rfd;
@@ -246,21 +254,24 @@ int get_wpa_cli_events(struct sigma_dut *dut, struct wpa_ctrl *mon,
 	if (fd < 0)
 		return -1;
 
-	time(&start);
+	if (timeout)
+		time(&start);
 	while (1) {
 		size_t len;
 
 		FD_ZERO(&rfd);
 		FD_SET(fd, &rfd);
 
-		time(&now);
-		if ((unsigned int) (now - start) >= dut->default_timeout)
-			tv.tv_sec = 1;
-		else
-			tv.tv_sec = dut->default_timeout -
-				(unsigned int) (now - start) + 1;
-		tv.tv_usec = 0;
-		ret = select(fd + 1, &rfd, NULL, NULL, &tv);
+		if (timeout) {
+			time(&now);
+			if ((unsigned int) (now - start) >= timeout)
+				tv.tv_sec = 1;
+			else
+				tv.tv_sec = timeout -
+					(unsigned int) (now - start) + 1;
+			tv.tv_usec = 0;
+		}
+		ret = select(fd + 1, &rfd, NULL, NULL, timeout ? &tv : NULL);
 		if (ret == 0) {
 			sigma_dut_print(dut, DUT_MSG_INFO, "Timeout on "
 					"waiting for events");
@@ -290,13 +301,24 @@ int get_wpa_cli_events(struct sigma_dut *dut, struct wpa_ctrl *mon,
 			}
 		}
 
+		if (!timeout)
+			continue;
+
 		time(&now);
-		if ((unsigned int) (now - start) > dut->default_timeout) {
+		if ((unsigned int) (now - start) > timeout) {
 			sigma_dut_print(dut, DUT_MSG_INFO, "Timeout on "
 					"waiting for event");
 			return -1;
 		}
 	}
+}
+
+
+int get_wpa_cli_events(struct sigma_dut *dut, struct wpa_ctrl *mon,
+		       const char **events, char *buf, size_t buf_size)
+{
+	return get_wpa_cli_events_timeout(dut, mon, events, buf, buf_size,
+					  dut->default_timeout);
 }
 
 
@@ -659,15 +681,32 @@ int set_cred_quoted(const char *ifname, int id, const char *field,
 }
 
 
+const char * concat_sigma_tmpdir(struct sigma_dut *dut, const char *src,
+				 char *dst, size_t len)
+{
+	snprintf(dst, len, "%s%s", dut->sigma_tmpdir, src);
+
+	return dst;
+}
+
+
 int start_sta_mode(struct sigma_dut *dut)
 {
 	FILE *f;
 	char buf[256];
-	char *ifname;
+	char sta_conf_path[100];
+	const char *ifname;
 	char *tmp, *pos;
 
-	if (dut->mode == SIGMA_MODE_STATION)
-		return 0;
+	if (dut->mode == SIGMA_MODE_STATION) {
+		if ((dut->use_5g && dut->sta_2g_started) ||
+		    (!dut->use_5g && dut->sta_5g_started)) {
+			stop_sta_mode(dut);
+			sleep(1);
+		} else {
+			return 0;
+		}
+	}
 
 	if (dut->mode == SIGMA_MODE_AP) {
 		if (system("killall hostapd") == 0) {
@@ -700,12 +739,13 @@ int start_sta_mode(struct sigma_dut *dut)
 
 	dut->mode = SIGMA_MODE_STATION;
 
-	ifname = get_main_ifname();
+	ifname = get_main_ifname(dut);
 	if (wpa_command(ifname, "PING") == 0)
 		return 0; /* wpa_supplicant is already running */
 
 	/* Start wpa_supplicant */
-	f = fopen(SIGMA_TMPDIR "/sigma_dut-sta.conf", "w");
+	f = fopen(concat_sigma_tmpdir(dut, "/sigma_dut-sta.conf", sta_conf_path,
+				      sizeof(sta_conf_path)), "w");
 	if (f == NULL)
 		return -1;
 
@@ -731,17 +771,26 @@ int start_sta_mode(struct sigma_dut *dut)
 	fclose(f);
 
 #ifdef  __QNXNTO__
-	snprintf(buf, sizeof(buf), "wpa_supplicant -Dqca -i%s -B %s%s"
-		 "-c" SIGMA_TMPDIR "/sigma_dut-sta.conf", ifname,
-		 dut->wpa_supplicant_debug_log ? "-K -t -ddd -f " : "",
+	snprintf(buf, sizeof(buf),
+		 "wpa_supplicant -Dqca -i%s -B %s%s%s -c %s/sigma_dut-sta.conf",
+		 ifname,
+		 dut->wpa_supplicant_debug_log ? "-K -t -ddd " : "",
+		 (dut->wpa_supplicant_debug_log &&
+		  dut->wpa_supplicant_debug_log[0]) ? "-f " : "",
 		 dut->wpa_supplicant_debug_log ?
-		 dut->wpa_supplicant_debug_log : "");
+		 dut->wpa_supplicant_debug_log : "",
+		 dut->sigma_tmpdir);
 #else /*__QNXNTO__*/
-	snprintf(buf, sizeof(buf), "wpa_supplicant -Dnl80211 -i%s -B %s%s "
-		 "-c" SIGMA_TMPDIR "/sigma_dut-sta.conf", ifname,
-		 dut->wpa_supplicant_debug_log ? "-K -t -ddd -f " : "",
+	snprintf(buf, sizeof(buf),
+		 "%swpa_supplicant -Dnl80211 -i%s -B %s%s%s -c %s/sigma_dut-sta.conf",
+		 file_exists("wpa_supplicant") ? "./" : "",
+		 ifname,
+		 dut->wpa_supplicant_debug_log ? "-K -t -ddd " : "",
+		 (dut->wpa_supplicant_debug_log &&
+		  dut->wpa_supplicant_debug_log[0]) ? "-f " : "",
 		 dut->wpa_supplicant_debug_log ?
-		 dut->wpa_supplicant_debug_log : "");
+		 dut->wpa_supplicant_debug_log : "",
+		 dut->sigma_tmpdir);
 #endif /*__QNXNTO__*/
 	if (system(buf) != 0) {
 		sigma_dut_print(dut, DUT_MSG_INFO, "Failed to run '%s'", buf);
@@ -755,6 +804,10 @@ int start_sta_mode(struct sigma_dut *dut)
 				"with wpa_supplicant");
 		return -1;
 	}
+	if (dut->use_5g)
+		dut->sta_5g_started = 1;
+	else
+		dut->sta_2g_started = 1;
 
 	return 0;
 }
@@ -763,7 +816,7 @@ int start_sta_mode(struct sigma_dut *dut)
 void stop_sta_mode(struct sigma_dut *dut)
 {
 	if (is_60g_sigma_dut(dut)) {
-		wpa_command(get_main_ifname(), "TERMINATE");
+		wpa_command(get_main_ifname(dut), "TERMINATE");
 		return;
 	}
 
@@ -771,4 +824,14 @@ void stop_sta_mode(struct sigma_dut *dut)
 	wpa_command("wlan1", "TERMINATE");
 	wpa_command("ath0", "TERMINATE");
 	wpa_command("ath1", "TERMINATE");
+	if (dut->main_ifname_2g)
+		wpa_command(dut->main_ifname_2g, "TERMINATE");
+	if (dut->main_ifname_5g)
+		wpa_command(dut->main_ifname_5g, "TERMINATE");
+	if (dut->station_ifname_2g)
+		wpa_command(dut->station_ifname_2g, "TERMINATE");
+	if (dut->station_ifname_5g)
+		wpa_command(dut->station_ifname_5g, "TERMINATE");
+	dut->sta_2g_started = 0;
+	dut->sta_5g_started = 0;
 }
