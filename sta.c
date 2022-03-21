@@ -3051,13 +3051,6 @@ static enum sigma_cmd_result sta_set_owe(struct sigma_dut *dut,
 		return ERROR_SEND_STATUS;
 	}
 
-	if (dut->owe_ptk_workaround &&
-	    set_network(ifname, id, "owe_ptk_workaround", "1") < 0) {
-		sigma_dut_print(dut, DUT_MSG_ERROR,
-				"Failed to set owe_ptk_workaround to 1");
-		return -2;
-	}
-
 	val = get_param(cmd, "ECGroupID");
 	if (val && strcmp(val, "0") == 0) {
 		if (wpa_command(ifname,
