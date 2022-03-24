@@ -1270,11 +1270,19 @@ static int sigma_nan_data_response(struct sigma_dut *dut,
 static int sigma_nan_data_end(struct sigma_dut *dut, struct sigma_cmd *cmd)
 {
 	const char *nmf_security_config = get_param(cmd, "Security");
-	NanDataPathEndRequest req;
+	NanDataPathEndRequest *req;
 	NanDebugParams cfg_debug;
 	int size;
 
-	memset(&req, 0, sizeof(NanDataPathEndRequest));
+	req = (NanDataPathEndRequest *)
+		malloc(sizeof(NanDataPathEndRequest) + sizeof(NanDataPathId));
+	if (!req) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Failure in allocation of NanDataPathEndRequest",
+				__func__);
+		return -1;
+	}
+	memset(req, 0, sizeof(NanDataPathEndRequest) + sizeof(NanDataPathId));
 	memset(&cfg_debug, 0, sizeof(NanDebugParams));
 	if (nmf_security_config) {
 		int nmf_security_config_val = 0;
@@ -1295,10 +1303,11 @@ static int sigma_nan_data_end(struct sigma_dut *dut, struct sigma_cmd *cmd)
 					 cfg_debug, size);
 	}
 
-	req.num_ndp_instances = 1;
-	req.ndp_instance_id[0] = global_ndp_instance_id;
+	req->num_ndp_instances = 1;
+	req->ndp_instance_id[0] = global_ndp_instance_id;
 
-	nan_data_end(0, dut->wifi_hal_iface_handle, &req);
+	nan_data_end(0, dut->wifi_hal_iface_handle, req);
+	free(req);
 	return 0;
 }
 
@@ -1768,8 +1777,6 @@ int sigma_nan_publish_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		tlv_len += len;
 
 		cfg_debug.cmd = NAN_TEST_MODE_CMD_TRANSPORT_IP_PARAM;
-		memcpy(cfg_debug.debug_cmd_data, &ndp_ip_trans_param,
-		       sizeof(NdpIpTransParams));
 		nan_debug_command_config(0, dut->wifi_hal_iface_handle,
 					 cfg_debug, tlv_len + sizeof(u32));
 	}
@@ -2448,6 +2455,10 @@ int nan_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 
 		memcpy(cfg_debug.debug_cmd_data, &device_type_val, sizeof(u32));
 		size = sizeof(u32) + sizeof(u32);
+
+		if (if_nametoindex(NAN_AWARE_IFACE))
+		    run_system_wrapper(dut, "ifconfig %s up", NAN_AWARE_IFACE);
+
 		sigma_dut_print(dut, DUT_MSG_INFO,
 				"%s: Device Type: cmd type = %d and command data = %u",
 				__func__, cfg_debug.cmd, device_type_val);

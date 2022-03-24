@@ -1,7 +1,7 @@
 /*
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2014-2017, Qualcomm Atheros, Inc.
- * Copyright (c) 2018, The Linux Foundation
+ * Copyright (c) 2018-2021, The Linux Foundation
  * Copyright (c) 2005-2011, Jouni Malinen <j@w1.fi>
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
@@ -75,6 +75,40 @@ enum driver_type get_driver_type(struct sigma_dut *dut)
 		return DRIVER_ATHEROS;
 	}
 	return wifi_chip_type;
+}
+
+
+void sigma_dut_get_device_driver_name(const char *ifname, char *name,
+				      size_t size)
+{
+	char fname[128], path[128];
+	struct stat s;
+	ssize_t res;
+	char *pos;
+
+	name[0] = '\0';
+
+	snprintf(path, sizeof(path), "/sys/class/net/%s/phy80211", ifname);
+	if (stat(path, &s) != 0)
+		return;
+
+	res = snprintf(fname, sizeof(fname),
+		       "/sys/class/net/%s/device/driver", ifname);
+	if (res < 0 || res >= sizeof(fname))
+		return;
+	res = readlink(fname, path, sizeof(path));
+	if (res < 0)
+		return;
+
+	if (res >= (int) sizeof(path))
+		res = sizeof(path) - 1;
+	path[res] = '\0';
+	pos = strrchr(path, '/');
+	if (!pos)
+		pos = path;
+	else
+		pos++;
+	snprintf(name, size, "%s", pos);
 }
 
 
@@ -339,15 +373,17 @@ size_t strlcat(char *dst, const char *str, size_t size)
 	size_t dstlen, srclen, copy;
 
 	srclen = strlen(str);
-	for (pos = dst; pos - dst < size && *dst; pos++)
-		;
-	dstlen = pos - dst;
-	if (*dst)
+	dstlen = strlen(dst);
+	pos = dst + dstlen;
+
+	if (dstlen >= size)
 		return dstlen + srclen;
-	if (dstlen + srclen + 1 > size)
+
+	if (dstlen + srclen >= size)
 		copy = size - dstlen - 1;
 	else
 		copy = srclen;
+
 	memcpy(pos, str, copy);
 	pos[copy] = '\0';
 	return dstlen + srclen;
@@ -382,6 +418,8 @@ void hex_dump(struct sigma_dut *dut, u8 *data, size_t len)
 void * nl80211_cmd(struct sigma_dut *dut, struct nl80211_ctx *ctx,
 		   struct nl_msg *msg, int flags, uint8_t cmd)
 {
+	if (!ctx)
+		return NULL;
 	return genlmsg_put(msg, 0, 0, ctx->netlink_familyid,
 			   0, flags, cmd, 0);
 }
@@ -414,6 +452,12 @@ struct nl_msg * nl80211_drv_msg(struct sigma_dut *dut, struct nl80211_ctx *ctx,
 				int ifindex, int flags, uint8_t cmd)
 {
 	return nl80211_ifindex_msg(dut, ctx, ifindex, flags, cmd);
+}
+
+
+static int no_seq_check(struct nl_msg *msg, void *arg)
+{
+	return NL_OK;
 }
 
 
@@ -500,9 +544,80 @@ int send_and_recv_msgs(struct sigma_dut *dut, struct nl80211_ctx *ctx,
 }
 
 
+struct family_data {
+	struct sigma_dut *dut;
+	const char *group;
+	int id;
+};
+
+static int family_handler(struct nl_msg *msg, void *arg)
+{
+	struct family_data *res = arg;
+	struct nlattr *tb[CTRL_ATTR_MAX + 1];
+	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+	struct nlattr *mcgrp;
+	int i;
+	struct sigma_dut *dut = res->dut;
+
+	nla_parse(tb, CTRL_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
+		  genlmsg_attrlen(gnlh, 0), NULL);
+
+	if (!tb[CTRL_ATTR_MCAST_GROUPS]) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"mcast groups is not present");
+		return NL_SKIP;
+	}
+
+	nla_for_each_nested(mcgrp, tb[CTRL_ATTR_MCAST_GROUPS], i) {
+		struct nlattr *tb2[CTRL_ATTR_MCAST_GRP_MAX + 1];
+
+		nla_parse(tb2, CTRL_ATTR_MCAST_GRP_MAX, nla_data(mcgrp),
+			  nla_len(mcgrp), NULL);
+		if (!tb2[CTRL_ATTR_MCAST_GRP_NAME] ||
+		    !tb2[CTRL_ATTR_MCAST_GRP_ID] ||
+		    strncmp(nla_data(tb2[CTRL_ATTR_MCAST_GRP_NAME]),
+			    res->group,
+			    nla_len(tb2[CTRL_ATTR_MCAST_GRP_NAME])) != 0)
+			continue;
+		res->id = nla_get_u32(tb2[CTRL_ATTR_MCAST_GRP_ID]);
+		break;
+	};
+
+	return NL_SKIP;
+}
+
+
+static int nl_get_multicast_id(struct sigma_dut *dut, struct nl80211_ctx *ctx,
+			       const char *family, const char *group)
+{
+	struct nl_msg *msg;
+	int ret;
+	struct family_data res = { dut, group, -ENOENT };
+
+	res.dut = dut;
+
+	msg = nlmsg_alloc();
+	if (!msg)
+		return -ENOMEM;
+	if (!genlmsg_put(msg, 0, 0, genl_ctrl_resolve(ctx->sock, "nlctrl"),
+			 0, 0, CTRL_CMD_GETFAMILY, 0) ||
+	    nla_put_string(msg, CTRL_ATTR_FAMILY_NAME, family)) {
+		nlmsg_free(msg);
+		return -1;
+	}
+
+	ret = send_and_recv_msgs(dut, ctx, msg, family_handler, &res);
+	if (ret == 0)
+		ret = res.id;
+	return ret;
+}
+
+
 struct nl80211_ctx * nl80211_init(struct sigma_dut *dut)
 {
 	struct nl80211_ctx *ctx;
+	struct nl_cb *cb = NULL;
+	int ret;
 
 	ctx = calloc(1, sizeof(struct nl80211_ctx));
 	if (!ctx) {
@@ -547,11 +662,57 @@ struct nl80211_ctx * nl80211_init(struct sigma_dut *dut)
 		goto cleanup;
 	}
 
+	ctx->event_sock = nl_socket_alloc();
+	if (!ctx->event_sock) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to create NL event socket, err: %s",
+				strerror(errno));
+		goto cleanup;
+	}
+
+	if (nl_connect(ctx->event_sock, NETLINK_GENERIC)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Could not connect event socket, err: %s",
+				strerror(errno));
+		goto cleanup;
+	}
+
+	if (nl_socket_set_buffer_size(ctx->event_sock, SOCK_BUF_SIZE, 0) < 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Fail to set nl_socket RX buff size for event sock: %s",
+				strerror(errno));
+	}
+
+	cb = nl_socket_get_cb(ctx->event_sock);
+	if (!cb) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Failed to get NL control block for event socket port");
+		goto cleanup;
+	}
+
+	ret = nl_get_multicast_id(dut, ctx, "nl80211", "vendor");
+	if (ret >= 0)
+		ret = nl_socket_add_membership(ctx->event_sock, ret);
+	if (ret < 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"nl80211: Could not add multicast "
+				"membership for vendor events: %d (%s)",
+			   ret, nl_geterror(ret));
+		/* Continue without vendor events */
+	}
+	nl_cb_err(cb, NL_CB_CUSTOM, error_handler, &ret);
+	nl_cb_set(cb, NL_CB_FINISH, NL_CB_CUSTOM, finish_handler, &ret);
+	nl_cb_set(cb, NL_CB_ACK, NL_CB_CUSTOM, ack_handler, &ret);
+	nl_cb_set(cb, NL_CB_SEQ_CHECK, NL_CB_CUSTOM, no_seq_check, NULL);
+	nl_cb_put(cb);
+
 	return ctx;
 
 cleanup:
 	if (ctx->sock)
 		nl_socket_free(ctx->sock);
+	if (ctx->event_sock)
+		nl_socket_free(ctx->event_sock);
 
 	free(ctx);
 	return NULL;
@@ -560,13 +721,123 @@ cleanup:
 
 void nl80211_deinit(struct sigma_dut *dut, struct nl80211_ctx *ctx)
 {
-	if (!ctx || !ctx->sock) {
-		sigma_dut_print(dut, DUT_MSG_ERROR, "%s: ctx/sock is NULL",
+	if (!ctx) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "%s: ctx is NULL",
 				__func__);
 		return;
 	}
-	nl_socket_free(ctx->sock);
+	if (ctx->sock)
+		nl_socket_free(ctx->sock);
+	if (ctx->event_sock)
+		nl_socket_free(ctx->event_sock);
 	free(ctx);
+}
+
+
+static struct nl_msg *
+wcn_create_wifi_test_config_msg(struct sigma_dut *dut, const char *intf)
+{
+	int ifindex;
+	struct nl_msg *msg;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Index for interface %s failed",
+				__func__, intf);
+		return NULL;
+	}
+
+	if (!(msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+				    NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_WIFI_TEST_CONFIGURATION)) {
+		nlmsg_free(msg);
+		return NULL;
+	}
+
+	return msg;
+}
+
+
+static int wcn_send_wifi_test_config_msg(struct sigma_dut *dut,
+					 struct nl_msg *msg,
+					 struct nlattr *params, int attr_id)
+{
+	int ret;
+
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d for %d",
+				__func__, ret, attr_id);
+	}
+
+	return ret;
+}
+
+
+int wcn_wifi_test_config_set_flag(struct sigma_dut *dut, const char *intf,
+				  int attr_id)
+{
+	struct nl_msg *msg;
+	struct nlattr *params;
+
+	if (!(msg = wcn_create_wifi_test_config_msg(dut, intf)) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)) ||
+	    nla_put_flag(msg, attr_id)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding test config data for %d",
+				__func__, attr_id);
+		nlmsg_free(msg);
+		return -1;
+	}
+
+	return wcn_send_wifi_test_config_msg(dut, msg, params, attr_id);
+}
+
+
+int wcn_wifi_test_config_set_u8(struct sigma_dut *dut, const char *intf,
+				int attr_id, uint8_t val)
+{
+	struct nl_msg *msg;
+	struct nlattr *params;
+
+	if (!(msg = wcn_create_wifi_test_config_msg(dut, intf)) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)) ||
+	    nla_put_u8(msg, attr_id, val)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding test config data for %d",
+				__func__, attr_id);
+		nlmsg_free(msg);
+		return -1;
+	}
+
+	return wcn_send_wifi_test_config_msg(dut, msg, params, attr_id);
+}
+
+
+int wcn_wifi_test_config_set_u16(struct sigma_dut *dut, const char *intf,
+				 int attr_id, uint16_t val)
+{
+	struct nl_msg *msg;
+	struct nlattr *params;
+
+	if (!(msg = wcn_create_wifi_test_config_msg(dut, intf)) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)) ||
+	    nla_put_u16(msg, attr_id, val)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding test config data for %d",
+				__func__, attr_id);
+		nlmsg_free(msg);
+		return -1;
+	}
+
+	return wcn_send_wifi_test_config_msg(dut, msg, params, attr_id);
 }
 
 #endif /* NL80211_SUPPORT */
@@ -740,4 +1011,35 @@ int wcn_driver_cmd(const char *ifname, char *buf)
 	res = ioctl(s, SIOCDEVPRIVATE + 1, &ifr);
 	close(s);
 	return res;
+}
+
+
+int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
+		  const char *ifname)
+{
+	char buf[200];
+
+	snprintf(buf, sizeof(buf), "ip -6 addr del %s/%s dev %s", ip, mask,
+		 ifname);
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+	if (system(buf) != 0) {
+		/*
+		 * This command may fail if the address being deleted does not
+		 * exist. Inaction here is intentional.
+		 */
+	}
+
+	snprintf(buf, sizeof(buf), "ip -6 addr add %s/%s dev %s", ip, mask,
+		 ifname);
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+	if (system(buf) != 0)
+		return -1;
+
+	return 0;
+}
+
+
+int snprintf_error(size_t size, int res)
+{
+	return res < 0 || (unsigned int) res >= size;
 }
