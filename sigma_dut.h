@@ -15,6 +15,7 @@
 #endif
 
 #include <stdlib.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -41,7 +42,23 @@
 #include "qca-vendor_copy.h"
 #include "nl80211_copy.h"
 #endif /* NL80211_SUPPORT */
+#ifdef ANDROID_WIFI_HAL
+/* avoid duplicate definitions from wifi_hal.h causing issues */
+#define u32 wifi_hal_u32
+#define u16 wifi_hal_u16
+#define u8 wifi_hal_u8
+#include "wifi_hal.h"
+#undef u32
+#undef u16
+#undef u8
+#endif /*ANDROID_WIFI_HAL*/
 
+#ifdef NL80211_SUPPORT
+#ifndef NL_CAPABILITY_VERSION_3_5_0
+#define nla_nest_start(msg, attrtype) \
+	nla_nest_start(msg, NLA_F_NESTED | (attrtype))
+#endif
+#endif
 
 #ifdef __GNUC__
 #define PRINTF_FORMAT(a,b) __attribute__ ((format (printf, (a), (b))))
@@ -63,18 +80,22 @@
 #define ETH_ALEN 6
 #endif
 
+#ifndef BIT_ULL
+#define BIT_ULL(nr)		(1ULL << (nr))
+#endif
+
 #ifndef ETH_P_ARP
 #define ETH_P_ARP 0x0806
 #endif
 
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(x) (sizeof((x)) / (sizeof(((x)[0]))))
-#endif
+#define IPV6_ADDR_LEN 16
 
 struct sigma_dut;
 
 #define MAX_PARAMS 100
 #define MAX_RADIO 3
+
+#define NAN_AWARE_IFACE "wifi-aware0"
 
 /* Set default operating channel width 80 MHz */
 #define VHT_DEFAULT_OPER_CHWIDTH AP_80_VHT_OPER_CHWIDTH
@@ -97,6 +118,14 @@ struct wfa_p2p_attribute {
 	uint16_t len;
 	uint8_t variable[0];
 } __attribute__((packed));
+
+struct dut_hw_modes {
+	u16 ht_capab;
+	u8 mcs_set[16];
+	u8 ampdu_params;
+	u32 vht_capab;
+	u8 vht_mcs_set[8];
+};
 
 #define WPA_GET_BE32(a) ((((u32) (a)[0]) << 24) | (((u32) (a)[1]) << 16) | \
 			 (((u32) (a)[2]) << 8) | ((u32) (a)[3]))
@@ -302,6 +331,7 @@ struct nl80211_ctx {
 	int netlink_familyid;
 	int nlctrl_familyid;
 	size_t sock_buf_size;
+	struct nl_sock *event_sock;
 };
 #endif /* NL80211_SUPPORT */
 
@@ -331,14 +361,29 @@ enum akm_suite_values {
 };
 
 struct sigma_dut {
+	const char *main_ifname;
+	char *main_ifname_2g;
+	char *main_ifname_5g;
+	const char *station_ifname;
+	char *station_ifname_2g;
+	char *station_ifname_5g;
+	char *p2p_ifname_buf;
+	int use_5g;
+	int ap_band_6g;
+	int sta_2g_started;
+	int sta_5g_started;
+
 	int s; /* server TCP socket */
 	int debug_level;
 	int stdout_debug;
 	struct sigma_cmd_handler *cmds;
 	int response_sent;
 
+	const char *sigma_tmpdir;
+
 	/* Default timeout value (seconds) for commands */
 	unsigned int default_timeout;
+	unsigned int user_config_timeout;
 
 	int next_streamid;
 
@@ -382,7 +427,7 @@ struct sigma_dut {
 
 	int go;
 	int p2p_client;
-	char *p2p_ifname;
+	const char *p2p_ifname;
 
 	int client_uapsd;
 
@@ -394,6 +439,8 @@ struct sigma_dut {
 		STA_PMF_OPTIONAL,
 		STA_PMF_REQUIRED
 	} sta_pmf;
+
+	int sta_ft_ds;
 
 	int no_tpk_expiration;
 
@@ -423,12 +470,14 @@ struct sigma_dut {
 		AP_11ng,
 		AP_11ac,
 		AP_11ad,
+		AP_11ax,
 		AP_inval
 	} ap_mode;
 	int ap_channel;
 	int ap_rts;
 	int ap_frgmnt;
 	int ap_bcnint;
+	int ap_start_disabled;
 	struct qos_params {
 		int ac;
 		int cwmin;
@@ -442,6 +491,7 @@ struct sigma_dut {
 	enum value_not_set_enabled_disabled ap_amsdu;
 	enum value_not_set_enabled_disabled ap_rx_amsdu;
 	int ap_ampdu_exp;
+	int ap_max_mpdu_len;
 	enum value_not_set_enabled_disabled ap_addba_reject;
 	int ap_fixed_rate;
 	int ap_mcs;
@@ -520,9 +570,16 @@ struct sigma_dut {
 	char *ap_sae_groups;
 	int sae_anti_clogging_threshold;
 	int sae_reflection;
+	int ap_sae_commit_status;
+	int ap_sae_pk_omit;
+	int sae_confirm_immediate;
 	char ap_passphrase[101];
 	char ap_psk[65];
 	char *ap_sae_passwords;
+	char *ap_sae_pk_modifier;
+	char *ap_sae_pk_keypair;
+	char *ap_sae_pk_keypair_sig;
+	int ap_sae_pk;
 	char ap_wepkey[27];
 	char ap_radius_ipaddr[20];
 	int ap_radius_port;
@@ -629,6 +686,7 @@ struct sigma_dut {
 	char ap_mobility_domain[10];
 	unsigned char ap_cell_cap_pref;
 	int ap_ft_oa;
+	enum value_not_set_enabled_disabled ap_ft_ds;
 	int ap_name;
 	int ap_interface_5g;
 	int ap_interface_2g;
@@ -651,6 +709,8 @@ struct sigma_dut {
 	unsigned int ap_akm_values;
 	int ap_pmksa;
 	int ap_pmksa_caching;
+	int ap_beacon_prot;
+	u8 ap_transition_disable;
 	int ap_80plus80;
 	int ap_oper_chn;
 
@@ -660,6 +720,16 @@ struct sigma_dut {
 	unsigned char ft_bss_mac_list[MAX_FT_BSS_LIST][ETH_ALEN];
 	int ft_bss_mac_cnt;
 
+	char *ar_ltf;
+
+	int ap_numsounddim;
+	unsigned int he_mcsnssmap;
+	int he_ul_mcs;
+	int he_mmss;
+	int he_srctrl_allow;
+
+	int ap_ocvc;
+
 	enum value_not_set_enabled_disabled ap_oce;
 	enum value_not_set_enabled_disabled ap_filsdscv;
 	enum value_not_set_enabled_disabled ap_filshlp;
@@ -667,13 +737,37 @@ struct sigma_dut {
 	enum value_not_set_enabled_disabled ap_rnr;
 	enum value_not_set_enabled_disabled ap_esp;
 
+	enum value_not_set_enabled_disabled ap_he_ulofdma;
+	enum value_not_set_enabled_disabled ap_he_dlofdma;
+	enum value_not_set_enabled_disabled ap_bcc;
+	enum value_not_set_enabled_disabled ap_he_frag;
+	enum value_not_set_enabled_disabled ap_mu_edca;
+	enum value_not_set_enabled_disabled ap_he_rtsthrshld;
+	enum value_not_set_enabled_disabled ap_mbssid;
+	enum value_not_set_enabled_disabled ap_twtresp;
+	enum value_not_set_enabled_disabled he_sounding;
+	enum value_not_set_enabled_disabled he_set_sta_1x1;
+
 	enum ppdu {
 		PPDU_NOT_SET,
 		PPDU_MU,
 		PPDU_SU,
 		PPDU_ER,
 		PPDU_TB,
+		PPDU_HESU,
 	} ap_he_ppdu;
+
+	enum bufsize {
+		BA_BUFSIZE_NOT_SET,
+		BA_BUFSIZE_64,
+		BA_BUFSIZE_256,
+	} ap_ba_bufsize;
+
+	enum mimo {
+		MIMO_NOT_SET,
+		MIMO_DL,
+		MIMO_UL,
+	} ap_he_mimo;
 
 	struct sigma_ese_alloc ap_ese_allocs[MAX_ESE_ALLOCS];
 	int ap_num_ese_allocs;
@@ -716,6 +810,9 @@ struct sigma_dut {
 
 	enum sec_ch_offset ap_chwidth_offset;
 
+	char *ap_dpp_conf_addr;
+	char *ap_dpp_conf_pkhash;
+
 #ifdef CONFIG_SNIFFER
 	pid_t sniffer_pid;
 	char sniffer_filename[200];
@@ -726,6 +823,7 @@ struct sigma_dut {
 	pthread_t rtsp_thread_handle;
 	int wfd_device_type; /* 0 for source, 1 for sink */
 	char peer_mac_address[32];
+	char modified_peer_mac_address[32];
 	void *miracast_lib;
 	const char *miracast_lib_path;
 	char mdns_instance_name[64];
@@ -755,6 +853,7 @@ struct sigma_dut {
 		PROGRAM_WPA3,
 		PROGRAM_HE,
 		PROGRAM_HS2_R3,
+		PROGRAM_QM,
 	} program;
 
 	enum device_type {
@@ -807,12 +906,16 @@ struct sigma_dut {
 	const char *vendor_name; /* device_get_info vendor override */
 	const char *model_name; /* device_get_info model override */
 	const char *version_name; /* device_get_info version override */
+	const char *log_file_dir; /* Directory to generate log file */
+	FILE *log_file_fd; /* Pointer to log file */
 
 	int ndp_enable; /* Flag which is set once the NDP is setup */
 
 	int ndpe; /* Flag indicating NDPE is supported */
 	u16 trans_port; /* transport port number for TCP/UDP connection */
 	u8 trans_proto; /* transport protocol, 0x06: TCP, 0x11: UDP */
+	u8 nan_ipv6_addr[IPV6_ADDR_LEN]; /* NAN IPv6 address */
+	u8 nan_ipv6_len; /* NAN IPv6 address length */
 
 	/* Length of nan_pmk in octets */
 	u8 nan_pmk_len;
@@ -832,6 +935,11 @@ struct sigma_dut {
 
 	char *sae_commit_override;
 	char *rsne_override;
+	char *rsnxe_override_eapol;
+	int sta_associate_wait_connect;
+	char server_cert_hash[65];
+	int server_cert_tod;
+	int sta_tod_policy;
 	const char *hostapd_bin;
 	int use_hostapd_pid_file;
 	const char *hostapd_ifname;
@@ -840,6 +948,7 @@ struct sigma_dut {
 	char *dpp_peer_uri;
 	int dpp_local_bootstrap;
 	int dpp_conf_id;
+	int dpp_network_id;
 
 	u8 fils_hlp;
 	pthread_t hlp_thread;
@@ -851,11 +960,38 @@ struct sigma_dut {
 
 	int sta_nss;
 
+	int sta_async_twt_supp; /* Asynchronous TWT response event support */
+
 #ifdef ANDROID
 	int nanservicediscoveryinprogress;
 #endif /* ANDROID */
 
 	const char *priv_cmd; /* iwpriv / cfg80211tool command name */
+
+	unsigned int wpa_log_size;
+	char dev_start_test_runtime_id[100];
+#ifdef ANDROID_WIFI_HAL
+	wifi_interface_handle wifi_hal_iface_handle;
+	wifi_handle wifi_hal_handle;
+	bool wifi_hal_initialized;
+#endif /*ANDROID_WIFI_HAL*/
+
+	int sae_h2e_default;
+	enum {
+		SAE_PWE_DEFAULT,
+		SAE_PWE_LOOP,
+		SAE_PWE_H2E
+	} sae_pwe;
+	int owe_ptk_workaround;
+	struct dut_hw_modes hw_modes;
+	int ocvc;
+	int beacon_prot;
+	int client_privacy;
+	int client_privacy_default;
+	int saquery_oci_freq;
+	char device_driver[32];
+	int user_config_ap_ocvc;
+	int user_config_ap_beacon_prot;
 };
 
 
@@ -889,14 +1025,17 @@ int sigma_dut_reg_cmd(const char *cmd,
 
 void sigma_dut_register_cmds(void);
 
-int cmd_sta_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
-		       struct sigma_cmd *cmd);
+enum sigma_cmd_result cmd_sta_send_frame(struct sigma_dut *dut,
+					 struct sigma_conn *conn,
+					 struct sigma_cmd *cmd);
 int cmd_sta_set_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 			  struct sigma_cmd *cmd);
-int cmd_ap_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
-		      struct sigma_cmd *cmd);
-int cmd_wlantest_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
-			    struct sigma_cmd *cmd);
+enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
+					struct sigma_conn *conn,
+					struct sigma_cmd *cmd);
+enum sigma_cmd_result cmd_wlantest_send_frame(struct sigma_dut *dut,
+					      struct sigma_conn *conn,
+					      struct sigma_cmd *cmd);
 int sta_cfon_set_wireless(struct sigma_dut *dut, struct sigma_conn *conn,
 			  struct sigma_cmd *cmd);
 int sta_cfon_get_mac_address(struct sigma_dut *dut, struct sigma_conn *conn,
@@ -924,8 +1063,10 @@ enum openwrt_driver_type {
 #define DRIVER_NAME_60G "wil6210"
 
 int set_wifi_chip(const char *chip_type);
-enum driver_type get_driver_type(void);
+enum driver_type get_driver_type(struct sigma_dut *dut);
 enum openwrt_driver_type get_openwrt_driver_type(void);
+void sigma_dut_get_device_driver_name(const char *ifname, char *name,
+				      size_t size);
 int file_exists(const char *fname);
 
 struct wpa_ctrl;
@@ -942,22 +1083,31 @@ int is_ip_addr(const char *str);
 int run_system(struct sigma_dut *dut, const char *cmd);
 int run_system_wrapper(struct sigma_dut *dut, const char *cmd, ...);
 int run_iwpriv(struct sigma_dut *dut, const char *ifname, const char *cmd, ...);
-int cmd_wlantest_set_channel(struct sigma_dut *dut, struct sigma_conn *conn,
-			     struct sigma_cmd *cmd);
+enum sigma_cmd_result cmd_wlantest_set_channel(struct sigma_dut *dut,
+					       struct sigma_conn *conn,
+					       struct sigma_cmd *cmd);
+void wlantest_register_cmds(void);
 void sniffer_close(struct sigma_dut *dut);
 
+/* sigma_dut.c */
+int wifi_hal_initialize(struct sigma_dut *dut);
+
 /* ap.c */
+void ap_register_cmds(void);
 void ath_disable_txbf(struct sigma_dut *dut, const char *intf);
 void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 			   const char *val);
-void novap_reset(struct sigma_dut *dut, const char *ifname);
+void novap_reset(struct sigma_dut *dut, const char *ifname, int reset);
 int get_hwaddr(const char *ifname, unsigned char *hwaddr);
-int cmd_ap_config_commit(struct sigma_dut *dut, struct sigma_conn *conn,
-			 struct sigma_cmd *cmd);
+enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
+					   struct sigma_conn *conn,
+					   struct sigma_cmd *cmd);
 int ap_wps_registration(struct sigma_dut *dut, struct sigma_conn *conn,
 			struct sigma_cmd *cmd);
+const char * get_hostapd_ifname(struct sigma_dut *dut);
 
 /* sta.c */
+void sta_register_cmds(void);
 int set_ps(const char *intf, struct sigma_dut *dut, int enabled);
 void ath_set_zero_crc(struct sigma_dut *dut, const char *val);
 void ath_set_cts_width(struct sigma_dut *dut, const char *ifname,
@@ -979,8 +1129,15 @@ int wil6210_set_ese(struct sigma_dut *dut, int count,
 int sta_extract_60g_ese(struct sigma_dut *dut, struct sigma_cmd *cmd,
 			struct sigma_ese_alloc *allocs, int *allocs_size);
 int wil6210_set_force_mcs(struct sigma_dut *dut, int force, int mcs);
+int sta_set_addba_buf_size(struct sigma_dut *dut,
+			   const char *intf, int bufsize);
+#ifdef NL80211_SUPPORT
+int wcn_set_he_ltf(struct sigma_dut *dut, const char *intf,
+		   enum qca_wlan_he_ltf_cfg ltf);
+#endif /* NL80211_SUPPORT */
 
 /* p2p.c */
+void p2p_register_cmds(void);
 int p2p_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 			      struct sigma_cmd *cmd);
 void p2p_create_event_thread(struct sigma_dut *dut);
@@ -989,8 +1146,12 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go);
 void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go);
 int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
 		      const char *peer, int full);
+enum sigma_cmd_result cmd_sta_p2p_reset(struct sigma_dut *dut,
+					struct sigma_conn *conn,
+					struct sigma_cmd *cmd);
 
 /* basic.c */
+void basic_register_cmds(void);
 void get_ver(const char *cmd, char *buf, size_t buflen);
 
 /* utils.c */
@@ -1019,6 +1180,8 @@ void str_remove_chars(char *str, char ch);
 int get_wps_forced_version(struct sigma_dut *dut, const char *str);
 int base64_encode(const char *src, size_t len, char *out, size_t out_len);
 int random_get_bytes(char *buf, size_t len);
+int get_enable_disable(const char *val);
+int wcn_driver_cmd(const char *ifname, char *buf);
 
 /* uapsd_stream.c */
 void receive_uapsd(struct sigma_stream *s);
@@ -1050,10 +1213,13 @@ int loc_cmd_sta_send_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 int loc_cmd_sta_preset_testparameters(struct sigma_dut *dut,
 				      struct sigma_conn *conn,
 				      struct sigma_cmd *cmd);
+int lowi_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd);
 
 /* dpp.c */
-int dpp_dev_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
-			struct sigma_cmd *cmd);
+enum sigma_cmd_result dpp_dev_exec_action(struct sigma_dut *dut,
+					  struct sigma_conn *conn,
+					  struct sigma_cmd *cmd);
 
 /* dhcp.c */
 void process_fils_hlp(struct sigma_dut *dut);
@@ -1069,6 +1235,23 @@ int send_and_recv_msgs(struct sigma_dut *dut, struct nl80211_ctx *ctx,
 		       struct nl_msg *nlmsg,
 		       int (*valid_handler)(struct nl_msg *, void *),
 		       void *valid_data);
+int wcn_wifi_test_config_set_flag(struct sigma_dut *dut, const char *intf,
+				  int attr_id);
+int wcn_wifi_test_config_set_u8(struct sigma_dut *dut, const char *intf,
+				int attr_id, uint8_t val);
+int wcn_wifi_test_config_set_u16(struct sigma_dut *dut, const char *intf,
+				 int attr_id, uint16_t val);
 #endif /* NL80211_SUPPORT */
+
+void traffic_register_cmds(void);
+void traffic_agent_register_cmds(void);
+void powerswitch_register_cmds(void);
+void atheros_register_cmds(void);
+void dev_register_cmds(void);
+void sniffer_register_cmds(void);
+void server_register_cmds(void);
+void miracast_register_cmds(void);
+int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
+		  const char *ifname);
 
 #endif /* SIGMA_DUT_H */
