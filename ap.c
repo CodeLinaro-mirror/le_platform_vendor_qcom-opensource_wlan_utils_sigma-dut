@@ -26,6 +26,7 @@
 #include <net/if.h>
 #include "wpa_ctrl.h"
 #include "wpa_helpers.h"
+#include "nl80211_copy.h"
 #ifdef ANDROID
 #include <hardware_legacy/wifi.h>
 #include <grp.h>
@@ -5412,6 +5413,10 @@ static int append_hostapd_conf_hs2(struct sigma_dut *dut, FILE *f)
 			"venue_url=10:https://bed-bath-and-beyond.r2m-testbed.wi-fi.org/floorplans/index.html\n"
 			);
 		break;
+	case 3:
+		fprintf(f,
+			"venue_url=1:http://the-great-mall.r2m-test bed.wi-fi.org/floorplans/index.html\n");
+		break;
 	}
 
 	switch (dut->ap_advice_of_charge) {
@@ -7999,6 +8004,7 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	enum driver_type drv;
 	const char *key_mgmt;
 	int conf_counter = 0;
+	bool append_vht = false;
 #ifdef ANDROID
 	struct group *gr;
 #endif /* ANDROID */
@@ -8026,6 +8032,13 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	}
 
 	dut->mode = SIGMA_MODE_AP;
+
+	if (dut->ap_dpp_conf_addr &&
+	    strcasecmp(dut->ap_dpp_conf_addr, "mDNS") == 0 &&
+	    dpp_mdns_discover_relay_params(dut) < 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Failed to discover DPP Controller for AP Relay using mDNS");
+	}
 
 	if (drv == DRIVER_ATHEROS)
 		return cmd_ath_ap_config_commit(dut, conn, cmd);
@@ -8445,7 +8458,8 @@ write_conf:
 				dut->ap_radius_port);
 		fprintf(f, "auth_server_shared_secret=%s\n",
 			dut->ap_radius_password);
-		if (dut->program == PROGRAM_HS2_R3) {
+		if (dut->program == PROGRAM_HS2_R3 ||
+		    dut->program == PROGRAM_HS2_R4) {
 			fprintf(f, "radius_das_port=3799\n");
 			fprintf(f, "radius_das_client=0.0.0.0 %s\n",
 				dut->ap_radius_password);
@@ -8809,9 +8823,14 @@ skip_key_mgmt:
 			fprintf(f, "fragment_size=128\n");
 	}
 
-	if (dut->ap_dpp_conf_addr && dut->ap_dpp_conf_pkhash)
-		fprintf(f, "dpp_controller=ipaddr=%s pkhash=%s\n",
-			dut->ap_dpp_conf_addr, dut->ap_dpp_conf_pkhash);
+	if (dut->ap_dpp_conf_addr && dut->ap_dpp_conf_pkhash) {
+		if (strcasecmp(dut->ap_dpp_conf_addr, "mDNS") != 0) {
+			fprintf(f, "dpp_controller=ipaddr=%s pkhash=%s\n",
+				dut->ap_dpp_conf_addr, dut->ap_dpp_conf_pkhash);
+			fprintf(f, "dpp_configurator_connectivity=1\n");
+		}
+		fprintf(f, "dpp_relay_port=8908\n");
+	}
 
 	if (dut->ap_he_rtsthrshld == VALUE_ENABLED)
 		fprintf(f, "he_rts_threshold=512\n");
@@ -8873,13 +8892,32 @@ skip_key_mgmt:
 					get_6g_ch_op_class(dut->ap_channel));
 		}
 
+		if (dut->use_5g) {
+			/* Do not try to enable VHT on the 2.4 GHz band when
+			 * configuring a dual band AP that does have VHT enabled
+			 * on the 5 GHz radio. */
+			if (dut->ap_is_dual) {
+				int chan;
+
+				if (conf_counter)
+					chan = dut->ap_tag_channel[0];
+				else
+					chan = dut->ap_channel;
+				append_vht = chan >= 36 && chan <= 171;
+			} else {
+				append_vht = true;
+			}
+		}
+
 		find_ap_ampdu_exp_and_max_mpdu_len(dut);
 
-		if (dut->ap_sgi80 || dut->ap_txBF ||
-		    dut->ap_ldpc != VALUE_NOT_SET ||
-		    dut->ap_tx_stbc == VALUE_ENABLED || dut->ap_mu_txBF ||
-		    dut->ap_ampdu_exp || dut->ap_max_mpdu_len ||
-		    dut->ap_chwidth == AP_160 || dut->ap_chwidth == AP_80_80) {
+		if (append_vht &&
+		    (dut->ap_sgi80 || dut->ap_txBF ||
+		     dut->ap_ldpc != VALUE_NOT_SET ||
+		     dut->ap_tx_stbc == VALUE_ENABLED || dut->ap_mu_txBF ||
+		     dut->ap_ampdu_exp || dut->ap_max_mpdu_len ||
+		     dut->ap_chwidth == AP_160 ||
+		     dut->ap_chwidth == AP_80_80)) {
 			fprintf(f, "vht_capab=%s%s%s%s%s%s",
 				dut->ap_sgi80 ? "[SHORT-GI-80]" : "",
 				dut->ap_txBF ?
@@ -9886,7 +9924,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_ocvc = dut->user_config_ap_ocvc;
 
 	if (dut->program == PROGRAM_HS2 || dut->program == PROGRAM_HS2_R2 ||
-	    dut->program == PROGRAM_HS2_R3 ||
+	    dut->program == PROGRAM_HS2_R3 || dut->program == PROGRAM_HS2_R4 ||
 	    dut->program == PROGRAM_IOTLP) {
 		int i;
 
@@ -9944,7 +9982,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	}
 
 	if (dut->program == PROGRAM_HS2_R2 || dut->program == PROGRAM_HS2_R3 ||
-	    dut->program == PROGRAM_IOTLP) {
+	     dut->program == PROGRAM_HS2_R4 || dut->program == PROGRAM_IOTLP) {
 		int i;
 		const char hessid[] = "50:6f:9a:00:11:22";
 
@@ -10193,7 +10231,11 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_dpp_conf_addr = NULL;
 	free(dut->ap_dpp_conf_pkhash);
 	dut->ap_dpp_conf_pkhash = NULL;
+	dut->dpp_local_bootstrap = -1;
 	dut->ap_start_disabled = 0;
+	dpp_mdns_stop(dut);
+	unlink("/tmp/dpp-rest-server.uri");
+	unlink("/tmp/dpp-rest-server.id");
 
 	if (is_60g_sigma_dut(dut)) {
 		dut->ap_mode = AP_11ad;
@@ -10459,10 +10501,10 @@ int open_monitor(const char *ifname);
 #endif /* __linux__ */
 
 enum send_frame_type {
-		DISASSOC, DEAUTH, SAQUERY
+		DISASSOC, DEAUTH, SAQUERY, CHANNEL_SWITCH
 };
 enum send_frame_protection {
-	CORRECT_KEY, INCORRECT_KEY, UNPROTECTED
+	PROTECTION_NOT_SET, CORRECT_KEY, INCORRECT_KEY, UNPROTECTED
 };
 
 
@@ -10533,6 +10575,8 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 	case SAQUERY:
 		*pos++ = 0xd0;
 		break;
+	default:
+		return -1;
 	}
 
 	if (protected == INCORRECT_KEY)
@@ -10609,6 +10653,8 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 			*pos++ = 0x12;
 			*pos++ = 0x34;
 			break;
+		default:
+			return -1;
 		}
 	}
 
@@ -11222,8 +11268,10 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 	/* const char *ifname = get_param(cmd, "INTERFACE"); */
 	const char *val;
 	enum send_frame_type frame;
-	enum send_frame_protection protected;
+	enum send_frame_protection protected = PROTECTION_NOT_SET;
 	char buf[100];
+	unsigned int freq;
+	unsigned int chan;
 
 	val = get_param(cmd, "Program");
 	if (val) {
@@ -11254,6 +11302,8 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 		frame = DEAUTH;
 	else if (strcasecmp(val, "saquery") == 0)
 		frame = SAQUERY;
+	else if (strcasecmp(val, "ChannelSwitchAnncment") == 0)
+		frame = CHANNEL_SWITCH;
 	else {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Unsupported "
 			  "PMFFrameType");
@@ -11263,27 +11313,25 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 	val = get_param(cmd, "PMFProtected");
 	if (val == NULL)
 		val = get_param(cmd, "Protected");
-	if (val == NULL)
-		return -1;
-	if (strcasecmp(val, "Correct-key") == 0 ||
-	    strcasecmp(val, "CorrectKey") == 0)
-		protected = CORRECT_KEY;
-	else if (strcasecmp(val, "IncorrectKey") == 0)
-		protected = INCORRECT_KEY;
-	else if (strcasecmp(val, "Unprotected") == 0)
-		protected = UNPROTECTED;
-	else {
-		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Unsupported "
-			  "PMFProtected");
-		return 0;
+	if (val) {
+		if (strcasecmp(val, "Correct-key") == 0 ||
+		    strcasecmp(val, "CorrectKey") == 0)
+			protected = CORRECT_KEY;
+		else if (strcasecmp(val, "IncorrectKey") == 0)
+			protected = INCORRECT_KEY;
+		else if (strcasecmp(val, "Unprotected") == 0)
+			protected = UNPROTECTED;
+		else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported PMFProtected");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	val = get_param(cmd, "stationID");
-	if (val == NULL)
-		return -1;
 
-	if (protected == INCORRECT_KEY ||
-	    (protected == UNPROTECTED && frame == SAQUERY))
+	if (val && (protected == INCORRECT_KEY ||
+		    (protected == UNPROTECTED && frame == SAQUERY)))
 		return ap_inject_frame(dut, conn, frame, protected, val);
 
 	switch (frame) {
@@ -11297,6 +11345,19 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 		break;
 	case SAQUERY:
 		snprintf(buf, sizeof(buf), "sa_query %s", val);
+		break;
+	case CHANNEL_SWITCH:
+		val = get_param(cmd, "channel");
+		if (!val)
+			return -1;
+		chan = atoi(val);
+		freq = channel_to_freq(dut, chan);
+		if (!freq) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid channel: %d", chan);
+			return INVALID_SEND_STATUS;
+		}
+		snprintf(buf, sizeof(buf), "chan_switch 5 %d", freq);
 		break;
 	}
 
@@ -13586,22 +13647,34 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	val = get_param(cmd, "GI");
 	if (val) {
 		int fix_rate_sgi;
+		u8 he_gi_val;
+		u8 auto_rate_gi;
 
 		if (strcmp(val, "0.8") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 9");
 			fix_rate_sgi = 1;
+			auto_rate_gi = 9;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_0_8;
 		} else if (strcmp(val, "1.6") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 10");
 			fix_rate_sgi = 2;
+			auto_rate_gi = 10;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_1_6;
 		} else if (strcmp(val, "3.2") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 11");
 			fix_rate_sgi = 3;
+			auto_rate_gi = 11;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_3_2;
 		} else {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,GI value not supported");
 			return STATUS_SENT_ERROR;
 		}
-		run_iwpriv(dut, ifname, "enable_short_gi %d", fix_rate_sgi);
+		if (wcn_set_he_gi(dut, ifname, he_gi_val)) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"wcn_set_he_gi failed, using iwpriv");
+			run_iwpriv(dut, ifname, "enable_short_gi %d",
+				   auto_rate_gi);
+			run_iwpriv(dut, ifname, "enable_short_gi %d",
+				   fix_rate_sgi);
+		}
 	}
 
 	val = get_param(cmd, "LTF");
@@ -14084,6 +14157,10 @@ cmd_ap_preset_testparameters(struct sigma_dut *dut, struct sigma_conn *conn,
 		free(dut->ap_dpp_conf_pkhash);
 		dut->ap_dpp_conf_pkhash = strdup(val);
 	}
+
+	if (dut->ap_dpp_conf_addr &&
+	    strcasecmp(dut->ap_dpp_conf_addr, "mDNS") == 0)
+		dpp_mdns_discover_relay_params(dut);
 
 	return 1;
 }
