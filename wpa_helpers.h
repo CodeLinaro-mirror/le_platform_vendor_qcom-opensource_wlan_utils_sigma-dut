@@ -10,9 +10,9 @@
 #ifndef WPA_HELPERS_H
 #define WPA_HELPERS_H
 
-char * get_main_ifname(void);
-char * get_station_ifname(void);
-const char * get_p2p_ifname(const char *primary_ifname);
+const char * get_main_ifname(struct sigma_dut *dut);
+const char * get_station_ifname(struct sigma_dut *dut);
+const char * get_p2p_ifname(struct sigma_dut *dut, const char *primary_ifname);
 void dut_ifc_reset(struct sigma_dut *dut);
 
 int wpa_command(const char *ifname, const char *cmd);
@@ -41,6 +41,9 @@ int get_wpa_cli_event2(struct sigma_dut *dut, struct wpa_ctrl *mon,
 		       char *buf, size_t buf_size);
 int get_wpa_cli_events(struct sigma_dut *dut, struct wpa_ctrl *mon,
 		       const char **events, char *buf, size_t buf_size);
+int get_wpa_cli_events_timeout(struct sigma_dut *dut, struct wpa_ctrl *mon,
+			       const char **events, char *buf, size_t buf_size,
+			       unsigned int timeout);
 
 int add_network(const char *ifname);
 int set_network(const char *ifname, int id, const char *field,
@@ -51,6 +54,9 @@ int add_cred(const char *ifname);
 int set_cred(const char *ifname, int id, const char *field, const char *value);
 int set_cred_quoted(const char *ifname, int id, const char *field,
 		    const char *value);
+
+const char * concat_sigma_tmpdir(struct sigma_dut *dut, const char *src,
+				 char *dst, size_t len);
 
 int start_sta_mode(struct sigma_dut *dut);
 void stop_sta_mode(struct sigma_dut *dut);
