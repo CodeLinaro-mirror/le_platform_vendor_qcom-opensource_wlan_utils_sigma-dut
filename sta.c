@@ -2623,7 +2623,7 @@ static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			char msg[300];
 
 			snprintf(msg, sizeof(msg),
-				 "ErrorCode,trustedRootCA file (%s) not found",
+				 "ErrorCode,imsiPrivacyCert file (%s) not found",
 				 buf);
 			send_resp(dut, conn, SIGMA_ERROR, msg);
 			return STATUS_SENT_ERROR;
@@ -2633,6 +2633,11 @@ static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
 				       buf) < 0)
 			return ERROR_SEND_STATUS;
 	}
+
+	val = get_param(cmd, "imsiPrivacyCertID");
+	if (val && set_network_quoted(ifname, id, "imsi_privacy_attr",
+				      val) < 0)
+		return ERROR_SEND_STATUS;
 
 	if (dut->akm_values &
 	    ((1 << AKM_FILS_SHA256) |
@@ -9502,7 +9507,12 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 	dut->dpp_local_bootstrap = -1;
 	wpa_command(intf, "SET dpp_config_processing 2");
 	wpa_command(intf, "SET dpp_mud_url ");
+	wpa_command(intf, "SET dpp_extra_conf_req_name ");
+	wpa_command(intf, "SET dpp_extra_conf_req_value ");
+	wpa_command(intf, "SET dpp_connector_privacy_default 0");
 	dpp_mdns_stop(dut);
+	unlink("/tmp/dpp-rest-server.uri");
+	unlink("/tmp/dpp-rest-server.id");
 
 	wpa_command(intf, "VENDOR_ELEM_REMOVE 13 *");
 
