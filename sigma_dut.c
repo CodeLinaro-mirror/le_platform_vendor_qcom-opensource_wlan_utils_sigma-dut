@@ -844,7 +844,6 @@ static void set_defaults(struct sigma_dut *dut)
 	dut->sta_nss = 2; /* Make default nss 2 */
 	dut->trans_proto = NAN_TRANSPORT_PROTOCOL_DEFAULT;
 	dut->trans_port = NAN_TRANSPORT_PORT_DEFAULT;
-	dut->nan_ipv6_len = 0;
 	dut->ap_p2p_cross_connect = -1;
 	dut->ap_chwidth = AP_AUTO;
 	dut->default_11na_ap_chwidth = AP_AUTO;

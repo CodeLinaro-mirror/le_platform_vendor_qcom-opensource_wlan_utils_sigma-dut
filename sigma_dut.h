@@ -86,8 +86,6 @@
 #define ETH_P_ARP 0x0806
 #endif
 
-#define IPV6_ADDR_LEN 16
-
 struct sigma_dut;
 
 #define MAX_PARAMS 100
@@ -953,8 +951,6 @@ struct sigma_dut {
 	int ndpe; /* Flag indicating NDPE is supported */
 	u16 trans_port; /* transport port number for TCP/UDP connection */
 	u8 trans_proto; /* transport protocol, 0x06: TCP, 0x11: UDP */
-	u8 nan_ipv6_addr[IPV6_ADDR_LEN]; /* NAN IPv6 address */
-	u8 nan_ipv6_len; /* NAN IPv6 address length */
 
 	/* Length of nan_pmk in octets */
 	u8 nan_pmk_len;
