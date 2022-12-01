@@ -2,7 +2,7 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
- * Copyright (c) 2018, The Linux Foundation
+ * Copyright (c) 2018-2021, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -23,11 +23,7 @@ extern enum driver_type wifi_chip_type;
 
 static struct sigma_dut sigma_dut;
 
-char *sigma_main_ifname = NULL;
 char *sigma_radio_ifname[MAX_RADIO] = {};
-char *sigma_station_ifname = NULL;
-char *sigma_p2p_ifname = NULL;
-static char *sigma_p2p_ifname_buf = NULL;
 char *sigma_wpas_ctrl = "/var/run/wpa_supplicant/";
 char *sigma_hapd_ctrl = NULL;
 char *client_socket_path = NULL;
@@ -39,9 +35,59 @@ char *sigma_cert_path = "/etc/wpa_supplicant";
  * otherwise default WMM-PS 0 */
 int sigma_wmm_ac = 0;
 
+/* For VO-Enterprise testing set this to 1 through argument
+ * to send periodic data.
+ */
+int sigma_periodic_data = 0;
 
 #ifdef ANDROID
 #include <android/log.h>
+
+#ifdef ANDROID_WIFI_HAL
+
+static void * wifi_hal_event_thread(void *ptr)
+{
+	struct sigma_dut *dut = ptr;
+
+	wifi_event_loop(dut->wifi_hal_handle);
+	pthread_exit(0);
+
+	return NULL;
+}
+
+
+int wifi_hal_initialize(struct sigma_dut *dut)
+{
+	pthread_t thread1;
+	wifi_error err;
+	const char *ifname;
+
+	if (dut->wifi_hal_initialized)
+		return 0;
+
+	err = wifi_initialize(&dut->wifi_hal_handle);
+	if (err) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"wifi hal initialize failed");
+		return -1;
+	}
+
+	if (if_nametoindex(NAN_AWARE_IFACE))
+		ifname = NAN_AWARE_IFACE;
+	else
+		ifname = "wlan0";
+
+	dut->wifi_hal_iface_handle = wifi_get_iface_handle(dut->wifi_hal_handle,
+							   (char *) ifname);
+
+	pthread_create(&thread1, NULL, &wifi_hal_event_thread, (void *) dut);
+	dut->wifi_hal_initialized = true;
+
+	return 0;
+}
+
+#endif /* ANDROID_WIFI_HAL */
+
 
 static enum android_LogPriority level_to_android_priority(int level)
 {
@@ -56,6 +102,7 @@ static enum android_LogPriority level_to_android_priority(int level)
 		return ANDROID_LOG_VERBOSE;
 	}
 }
+
 #endif /* ANDROID */
 
 
@@ -67,6 +114,7 @@ void sigma_dut_print(struct sigma_dut *dut, int level, const char *fmt, ...)
 	if (level < dut->debug_level)
 		return;
 
+	gettimeofday(&tv, NULL);
 #ifdef ANDROID
 	va_start(ap, fmt);
 	__android_log_vprint(level_to_android_priority(level),
@@ -74,10 +122,18 @@ void sigma_dut_print(struct sigma_dut *dut, int level, const char *fmt, ...)
 	va_end(ap);
 	if (!dut->stdout_debug)
 		return;
+#else /* ANDROID */
+	if (dut->log_file_fd) {
+		va_start(ap, fmt);
+		fprintf(dut->log_file_fd, "%ld.%06u: ",
+			(long) tv.tv_sec, (unsigned int) tv.tv_usec);
+		vfprintf(dut->log_file_fd, fmt, ap);
+		fprintf(dut->log_file_fd, "\n");
+		va_end(ap);
+	}
 #endif /* ANDROID */
 
 	va_start(ap, fmt);
-	gettimeofday(&tv, NULL);
 	printf("%ld.%06u: ", (long) tv.tv_sec,
 	       (unsigned int) tv.tv_usec);
 	vprintf(fmt, ap);
@@ -108,12 +164,20 @@ void sigma_dut_summary(struct sigma_dut *dut, const char *fmt, ...)
 
 int sigma_dut_reg_cmd(const char *cmd,
 		      int (*validate)(struct sigma_cmd *cmd),
-		      int (*process)(struct sigma_dut *dut,
-				     struct sigma_conn *conn,
-				     struct sigma_cmd *cmd))
+		      enum sigma_cmd_result (*process)(struct sigma_dut *dut,
+						       struct sigma_conn *conn,
+						       struct sigma_cmd *cmd))
 {
 	struct sigma_cmd_handler *h;
 	size_t clen, len;
+
+	for (h = sigma_dut.cmds; h; h = h->next) {
+		if (strcmp(h->cmd, cmd) == 0) {
+			printf("ERROR: Duplicate sigma_dut command registration for '%s'\n",
+			       cmd);
+			return -1;
+		}
+	}
 
 	clen = strlen(cmd);
 	len = sizeof(*h) + clen + 1;
@@ -270,6 +334,7 @@ void send_resp(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (sendmsg(conn->s, &msg, 0) < 0)
 		sigma_dut_print(dut, DUT_MSG_INFO, "sendmsg: %s",
 				strerror(errno));
+	dut->response_sent++;
 }
 
 
@@ -284,6 +349,40 @@ const char * get_param(struct sigma_cmd *cmd, const char *name)
 }
 
 
+const char * get_param_indexed(struct sigma_cmd *cmd, const char *name,
+			       int index)
+{
+	int i, j;
+
+	for (i = 0, j = 0; i < cmd->count; i++) {
+		if (strcasecmp(name, cmd->params[i]) == 0) {
+			j++;
+			if (j > index)
+				return cmd->values[i];
+		}
+	}
+
+	return NULL;
+}
+
+
+const char * get_param_fmt(struct sigma_cmd *cmd, const char *name, ...)
+{
+	va_list ap;
+	char buf[100];
+	int ret;
+
+	va_start(ap, name);
+	ret = vsnprintf(buf, sizeof(buf), name, ap);
+	va_end(ap);
+
+	if (ret < 0 || ret >= sizeof(buf))
+		return NULL;
+
+	return get_param(cmd, buf);
+}
+
+
 static void process_cmd(struct sigma_dut *dut, struct sigma_conn *conn,
 			char *buf)
 {
@@ -291,8 +390,8 @@ static void process_cmd(struct sigma_dut *dut, struct sigma_conn *conn,
 	struct sigma_cmd c;
 	char *cmd, *pos, *pos2;
 	int len;
-	char txt[200];
-	int res;
+	char txt[300];
+	enum sigma_cmd_result res;
 
 	while (*buf == '\r' || *buf == '\n' || *buf == '\t' || *buf == ' ')
 		buf++;
@@ -325,7 +424,7 @@ static void process_cmd(struct sigma_dut *dut, struct sigma_conn *conn,
 	sigma_dut_summary(dut, "CAPI cmd: %s", buf);
 	snprintf(txt, sizeof(txt), "NOTE CAPI:%s", buf);
 	txt[sizeof(txt) - 1] = '\0';
-	wpa_command(get_main_ifname(), txt);
+	wpa_command(get_main_ifname(dut), txt);
 
 	memset(&c, 0, sizeof(c));
 	cmd = buf;
@@ -385,15 +484,30 @@ static void process_cmd(struct sigma_dut *dut, struct sigma_conn *conn,
 		goto out;
 	}
 
+	dut->response_sent = 0;
 	send_resp(dut, conn, SIGMA_RUNNING, NULL);
 	sigma_dut_print(dut, DUT_MSG_INFO, "Run command: %s", cmd);
 	res = h->process(dut, conn, &c);
-	if (res == -2)
+	switch (res) {
+	case ERROR_SEND_STATUS:
 		send_resp(dut, conn, SIGMA_ERROR, NULL);
-	else if (res == -1)
+		break;
+	case INVALID_SEND_STATUS:
 		send_resp(dut, conn, SIGMA_INVALID, NULL);
-	else if (res == 1)
+		break;
+	case STATUS_SENT:
+	case STATUS_SENT_ERROR:
+		break;
+	case SUCCESS_SEND_STATUS:
 		send_resp(dut, conn, SIGMA_COMPLETE, NULL);
+		break;
+	}
+
+	if (!conn->waiting_completion && dut->response_sent != 2) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"ERROR: Unexpected number of status lines sent (%d) for command '%s'",
+				dut->response_sent, cmd);
+	}
 
 out:
 	if (dut->debug_level < DUT_MSG_INFO) {
@@ -472,6 +586,10 @@ static int stop_loop = 0;
 #ifdef __linux__
 static void handle_term(int sig)
 {
+	struct sigma_dut *dut = &sigma_dut;
+
+	if (dut->sta_2g_started || dut->sta_5g_started)
+		stop_sta_mode(dut);
 	stop_loop = 1;
 	stop_event_thread();
 	printf("sigma_dut terminating\n");
@@ -663,41 +781,170 @@ static int run_local_cmd(int port, char *lcmd)
 }
 
 
-static char * determine_sigma_p2p_ifname(void)
+static void determine_sigma_p2p_ifname(struct sigma_dut *dut)
 {
 	char buf[256];
 	struct wpa_ctrl *ctrl;
 
-	if (sigma_p2p_ifname)
-		return sigma_p2p_ifname;
+	if (dut->p2p_ifname)
+		return;
 
-	snprintf(buf, sizeof(buf), "p2p-dev-%s", get_station_ifname());
+	snprintf(buf, sizeof(buf), "p2p-dev-%s", get_station_ifname(dut));
 	ctrl = open_wpa_mon(buf);
 	if (ctrl) {
 		wpa_ctrl_detach(ctrl);
 		wpa_ctrl_close(ctrl);
-		sigma_p2p_ifname_buf = strdup(buf);
-		sigma_p2p_ifname = sigma_p2p_ifname_buf;
+		dut->p2p_ifname_buf = strdup(buf);
+		dut->p2p_ifname = dut->p2p_ifname_buf;
 		sigma_dut_print(&sigma_dut, DUT_MSG_INFO,
 				"Using interface %s for P2P operations instead of interface %s",
-				sigma_p2p_ifname ? sigma_p2p_ifname : "NULL",
-				get_station_ifname());
+				dut->p2p_ifname ? dut->p2p_ifname : "NULL",
+				get_station_ifname(dut));
 	} else {
-		sigma_p2p_ifname = get_station_ifname();
+		dut->p2p_ifname = get_station_ifname(dut);
 	}
+}
 
-	return sigma_p2p_ifname;
+
+static int get_nl80211_config_enable_option(struct sigma_dut *dut)
+{
+	char cmd[100], result[5];
+	FILE *f;
+	size_t len;
+	int ap_nl80211_enable;
+
+	snprintf(cmd, sizeof(cmd), "uci get qcacfg80211.config.enable");
+	f = popen(cmd, "r");
+	if (!f)
+		return -1;
+
+	len = fread(result, 1, sizeof(result) - 1, f);
+	pclose(f);
+
+	if (len == 0)
+		return -1;
+
+	result[len] = '\0';
+	ap_nl80211_enable = atoi(result);
+
+	if (ap_nl80211_enable)
+		dut->priv_cmd = "cfg80211tool";
+
+	return 0;
 }
 
 
 static void set_defaults(struct sigma_dut *dut)
 {
+	dut->debug_level = DUT_MSG_INFO;
+	dut->default_timeout = 120;
+	dut->dialog_token = 0;
+	dut->dpp_conf_id = -1;
+	dut->dpp_local_bootstrap = -1;
+	dut->sta_nss = 2; /* Make default nss 2 */
+	dut->trans_proto = NAN_TRANSPORT_PROTOCOL_DEFAULT;
+	dut->trans_port = NAN_TRANSPORT_PORT_DEFAULT;
+	dut->nan_ipv6_len = 0;
 	dut->ap_p2p_cross_connect = -1;
 	dut->ap_chwidth = AP_AUTO;
 	dut->default_11na_ap_chwidth = AP_AUTO;
 	dut->default_11ng_ap_chwidth = AP_AUTO;
 	/* by default, enable writing of traffic stream stats */
 	dut->write_stats = 1;
+	dut->priv_cmd = "iwpriv";
+	dut->sigma_tmpdir = SIGMA_TMPDIR;
+	dut->ap_ocvc = -1;
+	dut->user_config_ap_ocvc = -1;
+	dut->ap_sae_commit_status = -1;
+	dut->sta_async_twt_supp = -1;
+#ifdef ANDROID
+	dut->dscp_use_iptables = 1;
+#endif /* ANDROID */
+}
+
+
+static void deinit_sigma_dut(struct sigma_dut *dut)
+{
+	free(dut->non_pref_ch_list);
+	dut->non_pref_ch_list = NULL;
+	free(dut->btm_query_cand_list);
+	dut->btm_query_cand_list = NULL;
+	free(dut->rsne_override);
+	dut->rsne_override = NULL;
+	free(dut->rsnxe_override_eapol);
+	dut->rsnxe_override_eapol = NULL;
+	free(dut->ap_sae_groups);
+	dut->ap_sae_groups = NULL;
+	free(dut->dpp_peer_uri);
+	dut->dpp_peer_uri = NULL;
+	free(dut->ap_sae_passwords);
+	dut->ap_sae_passwords = NULL;
+	free(dut->ap_sae_pk_modifier);
+	dut->ap_sae_pk_modifier = NULL;
+	free(dut->ap_sae_pk_keypair);
+	dut->ap_sae_pk_keypair = NULL;
+	free(dut->ap_sae_pk_keypair_sig);
+	dut->ap_sae_pk_keypair_sig = NULL;
+	free(dut->ar_ltf);
+	dut->ar_ltf = NULL;
+	free(dut->ap_dpp_conf_addr);
+	dut->ap_dpp_conf_addr = NULL;
+	free(dut->ap_dpp_conf_pkhash);
+	dut->ap_dpp_conf_pkhash = NULL;
+	if (dut->log_file_fd) {
+		fclose(dut->log_file_fd);
+		dut->log_file_fd = NULL;
+	}
+	free(dut->p2p_ifname_buf);
+	dut->p2p_ifname_buf = NULL;
+	free(dut->main_ifname_2g);
+	dut->main_ifname_2g = NULL;
+	free(dut->main_ifname_5g);
+	dut->main_ifname_5g = NULL;
+	free(dut->station_ifname_2g);
+	dut->station_ifname_2g = NULL;
+	free(dut->station_ifname_5g);
+	dut->station_ifname_5g = NULL;
+	stop_dscp_policy_mon_thread(dut);
+	free_dscp_policy_table(dut);
+}
+
+
+static void set_main_ifname(struct sigma_dut *dut, const char *val)
+{
+	const char *pos;
+
+	dut->main_ifname = optarg;
+	pos = strchr(val, '/');
+	if (!pos)
+		return;
+	free(dut->main_ifname_2g);
+	dut->main_ifname_2g = malloc(pos - val + 1);
+	if (dut->main_ifname_2g) {
+		memcpy(dut->main_ifname_2g, val, pos - val);
+		dut->main_ifname_2g[pos - val] = '\0';
+	}
+	free(dut->main_ifname_5g);
+	dut->main_ifname_5g = strdup(pos + 1);
+}
+
+
+static void set_station_ifname(struct sigma_dut *dut, const char *val)
+{
+	const char *pos;
+
+	dut->station_ifname = optarg;
+	pos = strchr(val, '/');
+	if (!pos)
+		return;
+	free(dut->station_ifname_2g);
+	dut->station_ifname_2g = malloc(pos - val + 1);
+	if (dut->station_ifname_2g) {
+		memcpy(dut->station_ifname_2g, val, pos - val);
+		dut->station_ifname_2g[pos - val] = '\0';
+	}
+	free(dut->station_ifname_5g);
+	dut->station_ifname_5g = strdup(pos + 1);
 }
 
 
@@ -707,7 +954,7 @@ static const char * const license1 =
 "\n"
 "Copyright (c) 2010-2011, Atheros Communications, Inc.\n"
 "Copyright (c) 2011-2017, Qualcomm Atheros, Inc.\n"
-"Copyright (c) 2018, The Linux Foundation\n"
+"Copyright (c) 2018-2021, The Linux Foundation\n"
 "All Rights Reserved.\n"
 "Licensed under the Clear BSD license.\n"
 "\n";
@@ -750,6 +997,44 @@ static void print_license(void)
 }
 
 
+static void usage(void)
+{
+	printf("usage: sigma_dut [-aABdfGqQDIntuVW234] [-p<port>] "
+	       "[-s<sniffer>] [-m<set_maccaddr.sh>] \\\n"
+	       "       [-M<main ifname>] [-R<radio ifname>] "
+	       "[-S<station ifname>] [-P<p2p_ifname>]\\\n"
+	       "       [-T<throughput pktsize>] \\\n"
+	       "       [-w<wpa_supplicant/hostapd ctrl_iface dir>] \\\n"
+	       "       [-H <hostapd log file>] \\\n"
+	       "       [-F <hostapd binary path>] \\\n"
+	       "       [-j <hostapd ifname>] \\\n"
+	       "       [-J <wpa_supplicant debug log>] \\\n"
+	       "       [-C <certificate path>] \\\n"
+	       "       [-v <version string>] \\\n"
+	       "       [-L <summary log>] \\\n"
+	       "       [-c <wifi chip type: WCN or ATHEROS or "
+	       "AR6003 or MAC80211 or QNXNTO or OPENWRT or LINUX-WCN>] \\\n"
+	       "       [-i <IP address of the AP>] \\\n"
+	       "       [-k <subnet mask for the AP>] \\\n"
+	       "       [-K <sigma_dut log file directory>] \\\n"
+	       "       [-e <hostapd entropy file>] \\\n"
+	       "       [-N <device_get_info vendor>] \\\n"
+	       "       [-o <device_get_info model>] \\\n"
+	       "       [-O <device_get_info version>] \\\n"
+#ifdef MIRACAST
+	       "       [-x <sink|source>] \\\n"
+	       "       [-y <Miracast library path>] \\\n"
+#endif /* MIRACAST */
+	       "       [-z <client socket directory path \\\n"
+	       "       Ex: </data/vendor/wifi/sockets>] \\\n"
+	       "       [-Z <Override default tmp dir path>] \\\n"
+	       "       [-5 <WFD timeout override>] \\\n"
+	       "       [-r <HT40 or 2.4_HT40>] \\\n"
+	       "       [-6 <ocv or bp or ocv_bp>]\n");
+	printf("local command: sigma_dut [-p<port>] <-l<cmd>>\n");
+}
+
+
 int main(int argc, char *argv[])
 {
 	int c;
@@ -764,17 +1049,11 @@ int main(int argc, char *argv[])
 #endif /* __QNXNTO__ */
 
 	memset(&sigma_dut, 0, sizeof(sigma_dut));
-	sigma_dut.debug_level = DUT_MSG_INFO;
-	sigma_dut.default_timeout = 120;
-	sigma_dut.dialog_token = 0;
-	sigma_dut.dpp_conf_id = -1;
-	sigma_dut.dpp_local_bootstrap = -1;
-	sigma_dut.sta_nss = 2; /* Make default nss 2 */
 	set_defaults(&sigma_dut);
 
 	for (;;) {
 		c = getopt(argc, argv,
-			   "aAb:Bc:C:dDE:e:fF:gGhH:j:i:Ik:l:L:m:M:nN:o:O:p:P:qr:R:s:S:tT:uv:VWw:x:y:z:");
+			   "aAb:Bc:C:dDE:e:fF:gGhH:j:J:i:Ik:K:l:L:m:M:nN:o:O:p:P:qQr:R:s:S:tT:uv:VWw:x:y:z:Z:2345:6:");
 		if (c < 0)
 			break;
 		switch (c) {
@@ -830,6 +1109,9 @@ int main(int argc, char *argv[])
 		case 'j':
 			sigma_dut.hostapd_ifname = optarg;
 			break;
+		case 'J':
+			sigma_dut.wpa_supplicant_debug_log = optarg;
+			break;
 		case 'l':
 			local_cmd = optarg;
 			break;
@@ -840,10 +1122,15 @@ int main(int argc, char *argv[])
 			port = atoi(optarg);
 			break;
 		case 'P':
-			sigma_p2p_ifname = optarg;
+			sigma_dut.p2p_ifname = optarg;
 			break;
 		case 'q':
 			sigma_dut.debug_level++;
+			break;
+		case 'Q':
+			sigma_dut_print(&sigma_dut, DUT_MSG_INFO,
+					"Send Periodic data");
+			sigma_periodic_data = 1;
 			break;
 		case 'r':
 			if (strcmp(optarg, "HT40") == 0) {
@@ -885,7 +1172,7 @@ int main(int argc, char *argv[])
 			sigma_dut.set_macaddr = optarg;
 			break;
 		case 'M':
-			sigma_main_ifname = optarg;
+			set_main_ifname(&sigma_dut, optarg);
 			break;
 		case 'n':
 			sigma_dut.no_ip_addr_set = 1;
@@ -899,8 +1186,11 @@ int main(int argc, char *argv[])
 		case 'O':
 			sigma_dut.version_name = optarg;
 			break;
+		case 'K':
+			sigma_dut.log_file_dir = optarg;
+			break;
 		case 'S':
-			sigma_station_ifname = optarg;
+			set_station_ifname(&sigma_dut, optarg);
 			break;
 		case 'w':
 			sigma_hapd_ctrl = optarg;
@@ -958,46 +1248,55 @@ int main(int argc, char *argv[])
 		case 'z':
 			client_socket_path = optarg;
 			break;
+		case 'Z':
+			sigma_dut.sigma_tmpdir = optarg;
+			break;
+		case '2':
+			sigma_dut.sae_h2e_default = 1;
+			break;
+		case '3':
+			sigma_dut.owe_ptk_workaround = 1;
+			break;
+		case '4':
+			sigma_dut.client_privacy_default = 1;
+			break;
+		case '5': {
+			int timeout;
+
+			errno = 0;
+			timeout = strtol(optarg, NULL, 10);
+			if (errno || timeout < 0) {
+				sigma_dut_print(&sigma_dut, DUT_MSG_ERROR,
+					       "failed to set default_timeout");
+				return -1;
+			}
+			sigma_dut_print(&sigma_dut, DUT_MSG_INFO,
+					"default timeout set to %d", timeout);
+			sigma_dut.user_config_timeout = timeout;
+			break;
+		}
+		case '6':
+			if (strcmp(optarg, "ocv") == 0) {
+				sigma_dut.user_config_ap_ocvc = 1;
+			} else if (strcmp(optarg, "bp") == 0) {
+				sigma_dut.user_config_ap_beacon_prot = 1;
+			} else if (strcmp(optarg, "ocv_bp") == 0) {
+				sigma_dut.user_config_ap_beacon_prot = 1;
+				sigma_dut.user_config_ap_ocvc = 1;
+			} else {
+				printf("Unsupported -6 value\n");
+				exit(1);
+			}
+			break;
 		case 'h':
 		default:
-			printf("usage: sigma_dut [-aABdfGqDIntuVW] [-p<port>] "
-			       "[-s<sniffer>] [-m<set_maccaddr.sh>] \\\n"
-				"       [-M<main ifname>] [-R<radio ifname>] "
-			       "[-S<station ifname>] [-P<p2p_ifname>]\\\n"
-			       "       [-T<throughput pktsize>] \\\n"
-			       "       [-w<wpa_supplicant/hostapd ctrl_iface "
-			       "dir>] \\\n"
-			       "       [-H <hostapd log file>] \\\n"
-			       "       [-F <hostapd binary path>] \\\n"
-			       "       [-j <hostapd ifname>] \\\n"
-			       "       [-C <certificate path>] \\\n"
-			       "       [-v <version string>] \\\n"
-			       "       [-L <summary log>] \\\n"
-			       "       [-c <wifi chip type: WCN or ATHEROS or "
-			       "AR6003 or MAC80211 or QNXNTO or OPENWRT or "
-			       "LINUX-WCN>] "
-			       "\\\n"
-			       "       [-i <IP address of the AP>] \\\n"
-			       "       [-k <subnet mask for the AP>] \\\n"
-			       "       [-e <hostapd entropy file>] \\\n"
-			       "       [-N <device_get_info vendor>] \\\n"
-			       "       [-o <device_get_info model>] \\\n"
-			       "       [-O <device_get_info version>] \\\n"
-#ifdef MIRACAST
-			       "       [-x <sink|source>] \\\n"
-			       "       [-y <Miracast library path>] \\\n"
-#endif /* MIRACAST */
-			       "       [-z <client socket directory path \\\n"
-			       "       Ex: </data/vendor/wifi/sockets>] \\\n"
-			       "       [-r <HT40 or 2.4_HT40>]\n");
-			printf("local command: sigma_dut [-p<port>] "
-			       "<-l<cmd>>\n");
+			usage();
 			exit(0);
 			break;
 		}
 	}
 
-	sigma_dut.p2p_ifname = determine_sigma_p2p_ifname();
+	determine_sigma_p2p_ifname(&sigma_dut);
 #ifdef MIRACAST
 	miracast_init(&sigma_dut);
 #endif /* MIRACAST */
@@ -1006,13 +1305,24 @@ int main(int argc, char *argv[])
 
 	if ((wifi_chip_type == DRIVER_QNXNTO ||
 	     wifi_chip_type == DRIVER_LINUX_WCN) &&
-	    (sigma_main_ifname == NULL || sigma_station_ifname == NULL)) {
+	    (!sigma_dut.main_ifname || !sigma_dut.station_ifname)) {
 		sigma_dut_print(&sigma_dut, DUT_MSG_ERROR,
 				"Interface should be provided for QNX/LINUX-WCN driver - check option M and S");
 	}
 
+	if (get_openwrt_driver_type() == OPENWRT_DRIVER_ATHEROS)
+		get_nl80211_config_enable_option(&sigma_dut);
+
+	sigma_dut_get_device_driver_name(get_main_ifname(&sigma_dut),
+					 sigma_dut.device_driver,
+					 sizeof(sigma_dut.device_driver));
+	if (sigma_dut.device_driver[0])
+		sigma_dut_print(&sigma_dut, DUT_MSG_DEBUG, "device driver: %s",
+				sigma_dut.device_driver);
+
 #ifdef NL80211_SUPPORT
 	sigma_dut.nl_ctx = nl80211_init(&sigma_dut);
+	get_wiphy_capabilities(&sigma_dut);
 #endif /* NL80211_SUPPORT */
 	sigma_dut_register_cmds();
 
@@ -1073,19 +1383,11 @@ int main(int argc, char *argv[])
 	sniffer_close(&sigma_dut);
 #endif /* CONFIG_SNIFFER */
 
-	free(sigma_p2p_ifname_buf);
 	close_socket(&sigma_dut);
 #ifdef MIRACAST
 	miracast_deinit(&sigma_dut);
 #endif /* MIRACAST */
-	free(sigma_dut.non_pref_ch_list);
-	sigma_dut.non_pref_ch_list = NULL;
-	free(sigma_dut.btm_query_cand_list);
-	sigma_dut.btm_query_cand_list = NULL;
-	free(sigma_dut.rsne_override);
-	free(sigma_dut.ap_sae_groups);
-	free(sigma_dut.dpp_peer_uri);
-	free(sigma_dut.ap_tnc_url);
+	deinit_sigma_dut(&sigma_dut);
 #ifdef NL80211_SUPPORT
 	nl80211_deinit(&sigma_dut, sigma_dut.nl_ctx);
 #endif /* NL80211_SUPPORT */
