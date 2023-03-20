@@ -407,6 +407,12 @@ enum dpp_mdns_role {
 	DPP_MDNS_BOOTSTRAPPING,
 };
 
+enum loc_i2r_lmr_policy {
+	LOC_USE_DEFAULT_I2R_LMR_POLICY = 0,
+	LOC_FORCE_FTM_I2R_LMR_POLICY = 1,
+	LOC_ABORT_ON_I2R_LMR_POLICY_MISMATCH = 2,
+};
+
 struct sigma_dut {
 	const char *main_ifname;
 	char *main_ifname_2g;
@@ -905,6 +911,8 @@ struct sigma_dut {
 		PROGRAM_QM,
 		PROGRAM_HS2_R4,
 		PROGRAM_HS2_2022,
+		PROGRAM_LOCR2,
+		PROGRAM_EHT,
 	} program;
 
 	enum device_type {
@@ -929,6 +937,13 @@ struct sigma_dut {
 		WPS_BAND_NON_60G = 0,
 		WPS_BAND_60G,
 	} band;
+
+	enum dev_mode {
+		MODE_UNKNOWN = 0,
+		MODE_11AC,
+		MODE_11AX,
+		MODE_11BE,
+	} device_mode;
 
 	int wps_disable; /* Used for 60G to disable PCP from sending WPS IE */
 	int wsc_fragment; /* simulate WSC IE fragmentation */
@@ -1056,6 +1071,8 @@ struct sigma_dut {
 	int dscp_use_iptables;
 	int autoconnect_default;
 	int dhcp_client_running;
+	int i2rlmr_iftmr;
+	int i2rlmrpolicy;
 };
 
 
@@ -1225,6 +1242,7 @@ void get_ver(const char *cmd, char *buf, size_t buflen);
 
 /* utils.c */
 enum sigma_program sigma_program_to_enum(const char *prog);
+enum dev_mode dev_mode_to_enum(const char *mode);
 bool is_passpoint_r2_or_newer(enum sigma_program prog);
 bool is_passpoint(enum sigma_program prog);
 int hex_byte(const char *str);
@@ -1287,6 +1305,8 @@ int loc_cmd_sta_preset_testparameters(struct sigma_dut *dut,
 				      struct sigma_conn *conn,
 				      struct sigma_cmd *cmd);
 int lowi_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd);
+int loc_r2_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 
 /* dpp.c */
