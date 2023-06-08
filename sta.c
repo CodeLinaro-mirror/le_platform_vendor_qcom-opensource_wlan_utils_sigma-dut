@@ -1295,41 +1295,80 @@ static void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
 }
 
 
+/* Get DHCP client path. e.g. dhclient -> /sbin/dhclient
+ *
+ * name: input, DHCP client name
+ * buf: Output, DHCP client full path name
+ * buf_size: Input, maximum size of the output buffer
+ * Returns 0 for success, -1 if not found
+ */
+static int get_dhcp_client_path(const char *name, char *buf, size_t buf_size)
+{
+	char *path[] = {
+#ifdef ANDROID
+		"/system/bin",
+		"/vendor/bin"
+#else /* ANDROID */
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin"
+#endif /* ANDROID */
+	};
+	int i, num = sizeof(path) / sizeof(path[0]);
+
+	for (i = 0; i < num; i++) {
+		snprintf(buf, buf_size, "%s/%s", path[i], name);
+		if (access(buf, F_OK) != -1)
+			return 0;
+	}
+
+	/* not found */
+	return -1;
+}
+
+
 static int start_dhcp_client(struct sigma_dut *dut, const char *ifname)
 {
 #ifdef __linux__
+	char fpath[128];
 	char buf[200];
 
 #ifdef ANDROID
-	if (access("/system/bin/dhcpcd", F_OK) != -1) {
-		snprintf(buf, sizeof(buf),
-			 "/system/bin/dhcpcd -b %s", ifname);
-	} else if (access("/system/bin/dhcptool", F_OK) != -1) {
-		snprintf(buf, sizeof(buf), "/system/bin/dhcptool %s &", ifname);
-	} else if (access("/vendor/bin/dhcpcd", F_OK) != -1) {
-		snprintf(buf, sizeof(buf), "/vendor/bin/dhcpcd -b %s", ifname);
-	} else if (access("/vendor/bin/dhcptool", F_OK) != -1) {
-		snprintf(buf, sizeof(buf), "/vendor/bin/dhcptool %s", ifname);
+	if (get_dhcp_client_path("dhcpcd", fpath, sizeof(fpath)) == 0) {
+		snprintf(buf, sizeof(buf), "%s -b %s", fpath, ifname);
+	} else if (get_dhcp_client_path("dhcptool", fpath, sizeof(fpath)) ==
+		   0) {
+		snprintf(buf, sizeof(buf), "%s %s &", fpath, ifname);
 	} else {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"DHCP client program missing");
 		return 0;
 	}
 #else /* ANDROID */
-	snprintf(buf, sizeof(buf),
-		 "dhclient -nw -pf /var/run/dhclient-%s.pid %s",
-		 ifname, ifname);
+	if (get_dhcp_client_path("dhclient", fpath, sizeof(fpath)) == 0) {
+		snprintf(buf, sizeof(buf),
+			 "%s -nw -pf /var/run/dhclient-%s.pid %s",
+			 fpath, ifname, ifname);
+	} else if (get_dhcp_client_path("dhcpcd", fpath, sizeof(fpath)) == 0) {
+		snprintf(buf, sizeof(buf), "%s -t 0 %s &", fpath, ifname);
+	} else if (get_dhcp_client_path("udhcpc", fpath, sizeof(fpath)) == 0) {
+		snprintf(buf, sizeof(buf),
+			 "%s -i %s -p /var/run/dhclient-%s.pid -b",
+			 fpath, ifname, ifname);
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"DHCP client program missing");
+		return 0;
+	}
 #endif /* ANDROID */
 	sigma_dut_print(dut, DUT_MSG_INFO, "Start DHCP client: %s", buf);
 	if (system(buf) != 0) {
-		snprintf(buf, sizeof(buf), "dhcpcd -t 0 %s &", ifname);
-		if (system(buf) != 0) {
-			sigma_dut_print(dut, DUT_MSG_INFO,
-					"Failed to start DHCP client");
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Failed to start DHCP client");
 #ifndef ANDROID
-			return -1;
+		return -1;
 #endif /* ANDROID */
-		}
 	}
 
 	dut->dhcp_client_running = 1;
@@ -1451,6 +1490,34 @@ int set_ipv4_gw(struct sigma_dut *dut, const char *gw)
 }
 
 
+static void enable_sta_ipv6_configuration(struct sigma_dut *dut,
+					      const char *ifname,
+					      char *buf, size_t buf_size)
+{
+#if defined(ANDROID)
+	snprintf(buf, buf_size,
+		 "sysctl net.ipv6.conf.%s.disable_ipv6=0",
+		 ifname);
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+	if (system(buf) != 0) {
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"Failed to enable IPv6 address");
+	}
+#elif defined(LINUX_EMBEDDED)
+	snprintf(buf, buf_size,
+		"echo 2 > /proc/sys/net/ipv6/conf/%s/accept_ra",
+		ifname);
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+	if (system(buf) != 0) {
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"Failed to set accept_ra for IPv6 address");
+	}
+#else
+	/* No configuration changes needed */
+#endif
+}
+
+
 static enum sigma_cmd_result cmd_sta_set_ip_config(struct sigma_dut *dut,
 						   struct sigma_conn *conn,
 						   struct sigma_cmd *cmd)
@@ -1495,16 +1562,10 @@ static enum sigma_cmd_result cmd_sta_set_ip_config(struct sigma_dut *dut,
 			dut->last_set_ip_config_ipv6 = 1;
 			sigma_dut_print(dut, DUT_MSG_INFO, "Using IPv6 "
 					"stateless address autoconfiguration");
-#ifdef ANDROID
-			snprintf(buf, sizeof(buf),
-				 "sysctl net.ipv6.conf.%s.disable_ipv6=0",
-				 ifname);
-			sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
-			if (system(buf) != 0) {
-				sigma_dut_print(dut, DUT_MSG_DEBUG,
-						"Failed to enable IPv6 address");
-			}
 
+			enable_sta_ipv6_configuration(dut, ifname, buf,
+						      sizeof(buf));
+#ifdef ANDROID
 			/*
 			 * This sleep is required as the assignment in case of
 			 * Android is taking time and is done by the kernel.
