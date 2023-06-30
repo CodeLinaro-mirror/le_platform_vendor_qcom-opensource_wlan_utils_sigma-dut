@@ -90,8 +90,6 @@ const char * get_station_ifname(struct sigma_dut *dut)
 
 const char * get_p2p_ifname(struct sigma_dut *dut, const char *primary_ifname)
 {
-	if (primary_ifname == NULL)
-		return NULL;
 	if (strcmp(get_station_ifname(dut), primary_ifname) != 0)
 		return primary_ifname;
 

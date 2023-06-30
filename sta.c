@@ -3069,8 +3069,6 @@ static int sta_set_open(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *ifname;
 	int id;
 
-	if (intf == NULL)
-		return -1;
 	if (strcmp(intf, get_main_ifname(dut)) == 0)
 		ifname = get_station_ifname(dut);
 	else
@@ -3257,8 +3255,6 @@ static enum sigma_cmd_result cmd_sta_set_uapsd(struct sigma_dut *dut,
 	char buf[100];
 	int ret1, ret2;
 
-	if (intf == NULL)
-		return -1;
 	val = get_param(cmd, "maxSPLength");
 	if (val) {
 		max_sp_len = atoi(val);
@@ -7638,8 +7634,6 @@ static enum sigma_cmd_result cmd_sta_disconnect(struct sigma_dut *dut,
 	const char *intf = get_param(cmd, "Interface");
 	const char *val = get_param(cmd, "maintain_profile");
 
-	if (intf == NULL)
-		return -1;
 	if (dut->program == PROGRAM_OCE ||
 	    dut->program == PROGRAM_HE ||
 	    (val && atoi(val) == 1)) {
@@ -7674,8 +7668,6 @@ static enum sigma_cmd_result cmd_sta_reassoc(struct sigma_dut *dut,
 	int fastreassoc = 1;
 	int ft_ds = 0;
 
-	if (intf == NULL)
-		return -1;
 	if (bssid == NULL) {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Missing bssid "
 			  "argument");
@@ -9732,8 +9724,6 @@ static enum sigma_cmd_result cmd_sta_set_11n(struct sigma_dut *dut,
 	const char *intf = get_param(cmd, "Interface");
 	const char *val, *mcs32, *rate;
 
-	if (intf == NULL)
-		return -1;
 	val = get_param(cmd, "GREENFIELD");
 	if (val) {
 		if (strcmp(val, "1") == 0 || strcasecmp(val, "Enable") == 0) {
@@ -10571,8 +10561,6 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 	int wep = -1;
 	int iwpriv_status;
 
-	if (intf == NULL)
-		return -1;
 	program = get_param(cmd, "Program");
 	val = get_param(cmd, "SGI80");
 	if (val) {
@@ -11280,8 +11268,6 @@ static int sta_set_wireless_oce(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *intf = get_param(cmd, "Interface");
 	const char *val = get_param(cmd, "DevRole");
 
-	if (intf == NULL)
-		return -1;
 	if (val && strcasecmp(val, "STA-CFON") == 0) {
 		status = sta_cfon_set_wireless(dut, conn, cmd);
 		if (status)
@@ -11433,8 +11419,6 @@ static int ath_sta_send_addba(struct sigma_dut *dut, struct sigma_conn *conn,
 	int tid = 0;
 	char buf[100];
 
-	if (intf == NULL)
-		return -1;
 	val = get_param(cmd, "TID");
 	if (val) {
 		tid = atoi(val);
@@ -12522,12 +12506,6 @@ static int cmd_sta_send_frame_hs2_arpreply(struct sigma_dut *dut,
 	const char *val;
 	struct sockaddr_in taddr;
 
-	dst[0] = 0xFF;
-	dst[1] = 0xFF;
-	dst[2] = 0xFF;
-	dst[3] = 0xFF;
-	dst[4] = 0xFF;
-	dst[5] = 0xFF;
 	val = get_param(cmd, "dest");
 	if (val)
 		hwaddr_aton(val, (unsigned char *) dst);
@@ -15736,8 +15714,6 @@ static enum sigma_cmd_result cmd_sta_bssid_pool(struct sigma_dut *dut,
 	char *buf;
 	size_t buf_len;
 
-	if (intf == NULL)
-		return -1;
 	val = get_param(cmd, "BSSID_FILTER");
 	if (val == NULL)
 		return -1;
@@ -15781,8 +15757,6 @@ static enum sigma_cmd_result cmd_sta_reset_parm(struct sigma_dut *dut,
 
 	/* TODO: ARP */
 
-	if (intf == NULL)
-		return -1;
 	val = get_param(cmd, "HS2_CACHE_PROFILE");
 	if (val && strcasecmp(val, "All") == 0)
 		hs2_clear_credentials(intf);
@@ -15799,7 +15773,7 @@ static enum sigma_cmd_result cmd_sta_get_key(struct sigma_dut *dut,
 	const char *key_type = get_param(cmd, "KeyType");
 	char buf[100], resp[200];
 
-	if (key_type == NULL || intf == NULL)
+	if (key_type == NULL)
 		return -1;
 
 	if (strcasecmp(key_type, "GTK") == 0) {
@@ -15862,8 +15836,6 @@ static enum sigma_cmd_result cmd_sta_hs2_associate(struct sigma_dut *dut,
 		NULL
 	};
 
-	if (intf == NULL)
-		return -1;
 	start_sta_mode(dut);
 
 	if (band) {
@@ -15980,8 +15952,6 @@ static enum sigma_cmd_result cmd_sta_hs2_venue_info(struct sigma_dut *dut,
 	int res;
 	const char *events[] = { "RX-VENUE-URL", "ANQP-QUERY-DONE", NULL };
 
-	if (intf == NULL)
-		return -1;
 	if (get_wpa_status(intf, "bssid", bssid, sizeof(bssid)) < 0) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Could not get current BSSID");
@@ -16373,8 +16343,6 @@ static enum sigma_cmd_result cmd_sta_add_credential(struct sigma_dut *dut,
 	const char *intf = get_param(cmd, "Interface");
 	const char *type;
 
-	if (intf == NULL)
-		return -1;
 	start_sta_mode(dut);
 
 	type = get_param(cmd, "Type");
@@ -16409,8 +16377,6 @@ static enum sigma_cmd_result cmd_sta_scan(struct sigma_dut *dut,
 	enum sigma_cmd_result status;
 	struct wpa_ctrl *ctrl = NULL;
 
-	if (intf == NULL)
-		return -1;
 	start_sta_mode(dut);
 
 	val = get_param(cmd, "GetParameter");
@@ -16575,8 +16541,6 @@ static enum sigma_cmd_result cmd_sta_scan_bss(struct sigma_dut *dut,
 	int res;
 	struct wpa_ctrl *ctrl;
 
-	if (intf == NULL)
-		return -1;
 	bssid = get_param(cmd, "BSSID");
 	if (!bssid) {
 		send_resp(dut, conn, SIGMA_INVALID,
@@ -16725,8 +16689,6 @@ static enum sigma_cmd_result cmd_sta_osu(struct sigma_dut *dut,
 	int res;
 	struct wpa_ctrl *ctrl;
 
-	if (intf == NULL)
-		return -1;
 	name = get_param(cmd, "osuFriendlyName");
 	osu_ssid = get_param(cmd, "osu_ssid");
 
@@ -16949,8 +16911,6 @@ cmd_sta_wps_connect_pw_token(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *bssid = get_param(cmd, "Bssid");
 	char buf[100];
 
-	if (intf == NULL)
-		return -1;
 	if (!bssid) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Missing Bssid argument");

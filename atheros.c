@@ -21,7 +21,7 @@ static enum sigma_cmd_result cmd_sta_atheros(struct sigma_dut *dut,
 
 	intf = get_param(cmd, "interface");
 	c = get_param(cmd, "cmd");
-	if (c == NULL || intf == NULL)
+	if (c == NULL)
 		return INVALID_SEND_STATUS;
 
 	buf[0] = '\0';
