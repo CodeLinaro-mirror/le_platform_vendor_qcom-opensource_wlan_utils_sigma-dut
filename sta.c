@@ -8273,7 +8273,7 @@ static enum sigma_cmd_result cmd_sta_reassoc(struct sigma_dut *dut,
 	struct wpa_ctrl *ctrl;
 	char buf[1000];
 	char result[32];
-	int res;
+	int res = 0;
 	int chan = 0;
 	int freq = 0;
 	enum sigma_cmd_result status = STATUS_SENT;
@@ -8451,13 +8451,15 @@ static enum sigma_cmd_result cmd_sta_reassoc(struct sigma_dut *dut,
 		goto close_mon_conn;
 	}
 
-	res = get_wpa_cli_event(dut, ctrl, "CTRL-EVENT-CONNECTED",
-				buf, sizeof(buf));
-	if (res < 0) {
-		send_resp(dut, conn, SIGMA_ERROR,
-			  "errorCode,Connection did not complete");
-		status = STATUS_SENT_ERROR;
-		goto close_mon_conn;
+	if (dut->check_status) {
+		res = get_wpa_cli_event(dut, ctrl, "CTRL-EVENT-CONNECTED",
+					buf, sizeof(buf));
+		if (res < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Connection did not complete");
+			status = STATUS_SENT_ERROR;
+			goto close_mon_conn;
+		}
 	}
 	status = SUCCESS_SEND_STATUS;
 
