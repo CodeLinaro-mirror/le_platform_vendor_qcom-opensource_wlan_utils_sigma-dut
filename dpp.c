@@ -316,7 +316,8 @@ dpp_get_local_bootstrap(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *chan_list = get_param(cmd, "DPPChannelList");
 	const char *tcp = get_param(cmd, "DPPOverTCP");
 	const char *val;
-	char *pos, mac[50], buf[200], resp[1000], hex[2000];
+	char *pos, buf[200], resp[1000], hex[2000];
+	char mac[50] = {0};
 	const char *ifname = get_station_ifname(dut);
 	int res;
 	const char *type;
