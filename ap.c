@@ -278,6 +278,110 @@ void ath_set_cts_width(struct sigma_dut *dut, const char *ifname,
 }
 
 
+/**
+ * enum qca_ap_helper_config_params - This helper enum defines
+ * the config parameters which can be delivered to the AP mode driver using
+ * the vendor nl80211 path.
+ */
+enum qca_ap_helper_config_params {
+	/* For the attribute QCA_WLAN_VENDOR_ATTR_CONFIG_DYNAMIC_BW */
+	AP_SET_DYN_BW,
+
+	/* For the attribute QCA_WLAN_VENDOR_ATTR_CONFIG_LDPC */
+	AP_SET_LDPC,
+};
+
+
+static int ap_config_params(struct sigma_dut *dut, const char *intf,
+			    enum qca_ap_helper_config_params config_cmd,
+			    int value)
+{
+#ifdef NL80211_SUPPORT
+	struct nl_msg *msg;
+	int ret;
+	struct nlattr *params;
+	int ifindex;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Interface %s does not exist",
+				__func__, intf);
+		return -1;
+	}
+
+	if (!(msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+				    NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)))
+		goto fail;
+
+	switch (config_cmd) {
+	case AP_SET_DYN_BW:
+		if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_DYNAMIC_BW,
+			       value))
+			goto fail;
+		break;
+	case AP_SET_LDPC:
+		if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_LDPC, value))
+			goto fail;
+		break;
+	}
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+		return ret;
+	}
+
+	return 0;
+
+fail:
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"%s: err in adding vendor_cmd and vendor_data",
+			__func__);
+	nlmsg_free(msg);
+#endif /* NL80211_SUPPORT */
+	return -1;
+}
+
+
+void wcn_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
+						   const char *val)
+{
+	int set_val;
+	int res;
+
+	if (strcasecmp(val, "enable") == 0) {
+		dut->ap_dyn_bw_sig = VALUE_ENABLED;
+		set_val = 1;
+	} else if (strcasecmp(val, "disable") == 0) {
+		dut->ap_dyn_bw_sig = VALUE_DISABLED;
+		set_val = 0;
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported DYN_BW_SGL");
+		return;
+	}
+
+	res = ap_config_params(dut, ifname, AP_SET_DYN_BW, set_val);
+	if (res) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Set DYN_BW_SGL using NL failed - try iwpriv");
+		if (run_iwpriv(dut, ifname, "cwmenable %d", set_val) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"iwpriv cwmenable %d failed",
+					set_val);
+		}
+	}
+}
+
+
 void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 			   const char *val)
 {
@@ -304,9 +408,25 @@ void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 
 static void wcn_config_ap_ldpc(struct sigma_dut *dut, const char *ifname)
 {
-	if (dut->ap_ldpc == VALUE_NOT_SET)
+	int set_val;
+	int res;
+
+	if (dut->ap_ldpc == VALUE_ENABLED)
+		set_val = 1;
+	else if (dut->ap_ldpc == VALUE_DISABLED)
+		set_val = 0;
+	else
 		return;
-	run_iwpriv(dut, ifname, "ldpc %d", dut->ap_ldpc != VALUE_DISABLED);
+
+	res = ap_config_params(dut, ifname, AP_SET_LDPC, set_val);
+	if (res) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Setting of LDPC using NL failed - try iwpriv");
+		if (run_iwpriv(dut, ifname, "lpdc %d", set_val) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"iwpriv ldpc %d failed", set_val);
+		}
+	}
 }
 
 
@@ -1270,7 +1390,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 			break;
 		case DRIVER_WCN:
 		case DRIVER_LINUX_WCN:
-			ath_config_dyn_bw_sig(dut, ifname, val);
+			wcn_config_dyn_bw_sig(dut, ifname, val);
 			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -8071,11 +8191,13 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	const char *key_mgmt;
 	int conf_counter = 0;
 	bool append_vht = false;
+	enum ap_mode mode;
 #ifdef ANDROID
 	struct group *gr;
 #endif /* ANDROID */
 
 	drv = get_driver_type(dut);
+	mode = dut->ap_mode;
 
 	if (dut->mode == SIGMA_MODE_STATION) {
 		stop_sta_mode(dut);
@@ -8127,6 +8249,17 @@ write_conf:
 		if (run_system_wrapper(dut, "cp %s %s", f1, f2) != 0)
 			sigma_dut_print(dut, DUT_MSG_INFO,
 					"Failed to copy %s to %s", f1, f2);
+
+#ifdef ANDROID
+		if (chmod(f2, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Error changing permissions");
+
+		gr = getgrnam("wifi");
+		if (!gr || chown(f2, -1, gr->gr_gid) < 0)
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Error changing groupid");
+#endif /* ANDROID */
 	} else {
 		ap_conf_path_1[0] = '\0';
 	}
@@ -8143,7 +8276,10 @@ write_conf:
 
 	ifname = get_hostapd_ifname(dut);
 
-	switch (dut->ap_mode) {
+	if (conf_counter == 1 && dut->ap_mode_1 != AP_inval)
+		mode = dut->ap_mode_1;
+
+	switch (mode) {
 	case AP_11g:
 	case AP_11b:
 	case AP_11ng:
@@ -8195,14 +8331,14 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (dut->ap_mode == AP_11ng || dut->ap_mode == AP_11na ||
-	     (dut->ap_mode == AP_11ax && !dut->use_5g))) {
+	    (mode == AP_11ng || mode == AP_11na ||
+	     (mode == AP_11ax && !dut->use_5g))) {
 		int ht40plus = 0, ht40minus = 0, tx_stbc = 0;
 
 		fprintf(f, "ieee80211n=1\n");
-		if (dut->ap_mode == AP_11ax)
+		if (mode == AP_11ax)
 			fprintf(f, "ieee80211ax=1\n");
-		if (dut->ap_mode == AP_11ng &&
+		if (mode == AP_11ng &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
 		      dut->default_11ng_ap_chwidth == AP_40))) {
@@ -8214,7 +8350,7 @@ write_conf:
 		}
 
 		/* configure ht_capab based on channel width */
-		if (dut->ap_mode == AP_11na &&
+		if (mode == AP_11na &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
 		      dut->default_11na_ap_chwidth == AP_40))) {
@@ -8246,13 +8382,13 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (dut->ap_mode == AP_11ac ||
-	    (dut->ap_mode == AP_11ax && dut->use_5g))) {
+	    (mode == AP_11ac ||
+	    (mode == AP_11ax && dut->use_5g))) {
 		int ht40plus = 0, ht40minus = 0;
 
 		fprintf(f, "ieee80211ac=1\n"
 			"ieee80211n=1\n");
-		if (dut->ap_mode == AP_11ax)
+		if (mode == AP_11ax)
 			fprintf(f, "ieee80211ax=1\n");
 
 		/* configure ht_capab based on channel width */
@@ -8270,7 +8406,7 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (dut->ap_mode == AP_11ac || dut->ap_mode == AP_11na)) {
+	    (mode == AP_11ac || mode == AP_11na)) {
 		if (dut->ap_countrycode[0]) {
 			fprintf(f, "country_code=%s\n", dut->ap_countrycode);
 			fprintf(f, "ieee80211d=1\n");
@@ -8278,7 +8414,7 @@ write_conf:
 		}
 	}
 
-	if (drv == DRIVER_LINUX_WCN && dut->ap_mode == AP_11ax) {
+	if (drv == DRIVER_LINUX_WCN && mode == AP_11ax) {
 		if (dut->ap_txBF) {
 			fprintf(f, "he_su_beamformer=1\n");
 			fprintf(f, "he_su_beamformee=1\n");
@@ -8313,8 +8449,12 @@ write_conf:
 	if (dut->bridge)
 		fprintf(f, "bridge=%s\n", dut->bridge);
 
-	if (dut->ap_is_dual && conf_counter == 1)
-		fprintf(f, "channel=%d\n", dut->ap_tag_channel[0]);
+	if (dut->ap_is_dual && conf_counter == 1) {
+		if (dut->ap_channel_1)
+			fprintf(f, "channel=%d\n", dut->ap_channel_1);
+		else
+			fprintf(f, "channel=%d\n", dut->ap_tag_channel[0]);
+	}
 	else
 		fprintf(f, "channel=%d\n", dut->ap_channel);
 
@@ -8327,6 +8467,8 @@ write_conf:
 		fprintf(f, "ssid=%s\n", dut->ap_ssid);
 	else if (dut->ap_tag_ssid[0][0] && conf_counter == 1)
 		fprintf(f, "ssid=%s\n", dut->ap_tag_ssid[0]);
+	else if (dut->ap_ssid[0] && conf_counter == 1)
+		fprintf(f, "ssid=%s\n", dut->ap_ssid);
 	else
 		fprintf(f, "ssid=QCA AP OOB\n");
 
@@ -8909,6 +9051,26 @@ skip_key_mgmt:
 	    (dut->program == PROGRAM_HE && dut->use_5g)) {
 		int vht_oper_centr_freq_idx;
 
+		/* Do not try to enable VHT or higher channel bandwidth for HE
+		 * on the 2.4 GHz band when configuring a dual band AP that
+		 * does have VHT enabled on the 5 GHz radio. */
+		if (dut->use_5g) {
+			if (dut->ap_is_dual) {
+				int chan;
+
+				if (conf_counter)
+					chan = dut->ap_tag_channel[0];
+				else
+					chan = dut->ap_channel;
+				append_vht = chan >= 36 && chan <= 171;
+			} else {
+				append_vht = true;
+			}
+		}
+
+		if (!append_vht)
+			goto skip_vht_parameters_set;
+
 		if (check_channel(dut, dut->ap_channel) < 0) {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Invalid channel");
@@ -8951,30 +9113,13 @@ skip_key_mgmt:
 		fprintf(f, "vht_oper_centr_freq_seg0_idx=%d\n",
 			vht_oper_centr_freq_idx);
 		fprintf(f, "vht_oper_chwidth=%d\n", dut->ap_vht_chwidth);
-		if (dut->ap_mode == AP_11ax) {
+		if (mode == AP_11ax) {
 			fprintf(f, "he_oper_chwidth=%d\n", dut->ap_vht_chwidth);
 			fprintf(f, "he_oper_centr_freq_seg0_idx=%d\n",
 				vht_oper_centr_freq_idx);
 			if (dut->ap_band_6g)
 				fprintf(f, "op_class=%d\n",
 					get_6g_ch_op_class(dut->ap_channel));
-		}
-
-		if (dut->use_5g) {
-			/* Do not try to enable VHT on the 2.4 GHz band when
-			 * configuring a dual band AP that does have VHT enabled
-			 * on the 5 GHz radio. */
-			if (dut->ap_is_dual) {
-				int chan;
-
-				if (conf_counter)
-					chan = dut->ap_tag_channel[0];
-				else
-					chan = dut->ap_channel;
-				append_vht = chan >= 36 && chan <= 171;
-			} else {
-				append_vht = true;
-			}
 		}
 
 		find_ap_ampdu_exp_and_max_mpdu_len(dut);
@@ -9010,6 +9155,7 @@ skip_key_mgmt:
 			fprintf(f, "\n");
 		}
 	}
+skip_vht_parameters_set:
 
 	if (dut->ap_key_mgmt == AP_WPA2_OWE && dut->ap_tag_ssid[0][0] &&
 	    dut->ap_tag_key_mgmt[0] == AP2_OPEN) {
@@ -9929,6 +10075,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_is_dual = 0;
 	dut->ap_mode = AP_inval;
 	dut->ap_mode_1 = AP_inval;
+	dut->ap_channel_1 = 0;
 
 	dut->ap_allow_vht_wep = 0;
 	dut->ap_allow_vht_tkip = 0;
