@@ -457,8 +457,10 @@ static void ath_set_txpower(struct sigma_dut *dut, const char *ifname,
 		snprintf(buf, sizeof(buf), "iwconfig %s txpower 29", ifname);
 	else if (strcasecmp(val, "low") == 0)
 		snprintf(buf, sizeof(buf), "iwconfig %s txpower 1", ifname);
-	else
+	else {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported txpower");
+		return;
+	}
 
 	if (system(buf) != 0)
 		sigma_dut_print(dut, DUT_MSG_ERROR, "setting txpower failed");
