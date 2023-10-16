@@ -14,6 +14,9 @@
 #define _GNU_SOURCE	1
 #endif
 
+#ifdef ANDROID_MDNS
+#include "dns_sd.h"
+#endif /* ANDROID_MDNS */
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -272,6 +275,7 @@ struct sigma_stream {
 	char test_name[9]; /* test case name */
 	int can_quit;
 	int reset;
+	int tos;
 };
 
 #endif /* CONFIG_TRAFFIC_AGENT */
@@ -412,6 +416,97 @@ enum loc_i2r_lmr_policy {
 	LOC_FORCE_FTM_I2R_LMR_POLICY = 1,
 	LOC_ABORT_ON_I2R_LMR_POLICY_MISMATCH = 2,
 };
+
+#define NAN_MAX_COOKIE_LEN 64
+#define NAN_MAX_PASSWORD_LEN 63
+#define NAN_NIK_LEN 16
+
+enum nan_bootstrapping_state {
+	NAN_BOOTSTRAP_IDLE,
+	NAN_BOOTSTRAP_REQ_SENT,
+	NAN_BOOTSTRAP_REQ_RECVD,
+	NAN_BOOTSTRAP_COMEBACK_RSP_SENT,
+	NAN_BOOTSTRAP_COMEBACK_RSP_RECVD,
+	NAN_BOOTSTRAP_COMEBACK_REQ_SENT,
+	NAN_BOOTSTRAPPING_DONE,
+};
+
+enum secure_nan_role {
+	SECURE_NAN_IDLE,
+	SECURE_NAN_BOOTSTRAPPING_INITIATOR,
+	SECURE_NAN_BOOTSTRAPPING_RESPONDER,
+	SECURE_NAN_PAIRING_INITIATOR,
+	SECURE_NAN_PAIRING_RESPONDER,
+};
+
+struct device_pairing_info {
+	bool pairing_setup;
+	bool npk_nik_caching;
+	bool pairing_verification;
+	int bootstrapping_methods;
+	int dialog_token;
+	bool password_valid;
+	char password[NAN_MAX_PASSWORD_LEN];
+	bool nik_valid;
+	char nik[NAN_NIK_LEN];
+	enum secure_nan_role role;
+	bool trigger_verification;
+};
+
+enum nan_akm {
+	NAN_AKM_SAE,
+	NAN_AKM_PASN = 1
+};
+
+struct peer_pairing_info {
+	u16 publish_subscribe_id;
+	int pairing_instance_id;
+	char peer_mac_addr[ETH_ALEN];
+	bool pairing_setup;
+	bool npk_nik_caching;
+	bool pairing_verification;
+	int supported_bootstrap_methods;
+	int selected_bootstrap_method;
+	enum nan_bootstrapping_state bs_state;
+	bool nik_valid;
+	char nik[NAN_NIK_LEN];
+	enum secure_nan_role role;
+	int cookie_len;
+	char cookie[NAN_MAX_COOKIE_LEN];
+	enum nan_akm akm;
+	bool is_paired;
+};
+
+#ifdef ANDROID_MDNS
+struct mdnssd_apis {
+	__typeof__(DNSServiceCreateConnection) *service_create_connection;
+	__typeof__(DNSServiceRefSockFD) *service_socket_fd;
+	__typeof__(DNSServiceProcessResult) *service_process_result;
+	__typeof__(DNSServiceRegister) *service_register;
+	__typeof__(DNSServiceRefDeallocate) *service_deallocate;
+	__typeof__(DNSServiceBrowse) *service_browse;
+	__typeof__(DNSServiceResolve) *service_resolve;
+	__typeof__(DNSServiceGetAddrInfo) *get_addr_info;
+	__typeof__(TXTRecordCreate) *txt_create;
+	__typeof__(TXTRecordSetValue) *txt_set_value;
+	__typeof__(TXTRecordDeallocate) *txt_deallocate;
+	__typeof__(TXTRecordContainsKey) *txt_contains_key;
+	__typeof__(TXTRecordGetValuePtr) *txt_get_value;
+	__typeof__(TXTRecordGetLength) *txt_get_length;
+	__typeof__(TXTRecordGetBytesPtr) *txt_get_bytes;
+};
+
+struct mdnss_discovery_info {
+	char *type;
+	char *name;
+	char *domain;
+	char *host_name;
+	char *bskeyhash;
+	char ipaddr[100];
+	uint16_t port;
+	uint32_t ifindex;
+};
+#endif /* ANDROID_MDNS */
 
 struct sigma_dut {
 	const char *main_ifname;
@@ -961,6 +1056,7 @@ struct sigma_dut {
 	const char *version;
 	int no_ip_addr_set;
 	int sta_channel;
+	int data_ch_freq;
 
 	const char *summary_log;
 	const char *hostapd_entropy_log;
@@ -1073,6 +1169,15 @@ struct sigma_dut {
 	int dhcp_client_running;
 	int i2rlmr_iftmr;
 	int i2rlmrpolicy;
+	int rnm_mfp;
+	struct device_pairing_info dev_info;
+	struct peer_pairing_info peer_info;
+#ifdef ANDROID_MDNS
+	DNSServiceRef mdns_service;
+	void *mdnssd_so;
+	struct mdnssd_apis mdnssd;
+	struct mdnss_discovery_info mdns_discover;
+#endif /* ANDROID_MDNS */
 };
 
 
@@ -1353,5 +1458,9 @@ int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
 		  const char *ifname);
 void kill_pid(struct sigma_dut *dut, const char *pid_file);
 int get_ip_addr(const char *ifname, int ipv6, char *buf, size_t len);
+bool is_6ghz_freq(int freq);
+
+/* dnssd.c */
+int mdnssd_init(struct sigma_dut *dut);
 
 #endif /* SIGMA_DUT_H */
