@@ -14,6 +14,9 @@
 #define _GNU_SOURCE	1
 #endif
 
+#ifdef ANDROID_MDNS
+#include "dns_sd.h"
+#endif /* ANDROID_MDNS */
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -84,6 +87,11 @@
 
 #ifndef ETH_P_ARP
 #define ETH_P_ARP 0x0806
+#endif
+
+#ifndef MAC2STR
+#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
+#define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 #endif
 
 #define IPV6_ADDR_LEN 16
@@ -209,7 +217,8 @@ struct sigma_stream {
 		SIGMA_PROFILE_IPTV,
 		SIGMA_PROFILE_TRANSACTION,
 		SIGMA_PROFILE_START_SYNC,
-		SIGMA_PROFILE_UAPSD
+		SIGMA_PROFILE_UAPSD,
+		SIGMA_PROFILE_BURST,
 	} profile;
 	int sender;
 	struct in_addr dst;
@@ -237,6 +246,11 @@ struct sigma_stream {
 	int stop;
 	int ta_send_in_progress;
 	int trans_proto;
+
+	int no_of_pkts_burst;
+	int burst_periodicity;
+	int dscp;
+	bool use_dscp;
 
 	/* Statistics */
 	int tx_act_frames; /*
@@ -272,6 +286,7 @@ struct sigma_stream {
 	char test_name[9]; /* test case name */
 	int can_quit;
 	int reset;
+	int tos;
 };
 
 #endif /* CONFIG_TRAFFIC_AGENT */
@@ -472,6 +487,37 @@ struct peer_pairing_info {
 	enum nan_akm akm;
 	bool is_paired;
 };
+
+#ifdef ANDROID_MDNS
+struct mdnssd_apis {
+	__typeof__(DNSServiceCreateConnection) *service_create_connection;
+	__typeof__(DNSServiceRefSockFD) *service_socket_fd;
+	__typeof__(DNSServiceProcessResult) *service_process_result;
+	__typeof__(DNSServiceRegister) *service_register;
+	__typeof__(DNSServiceRefDeallocate) *service_deallocate;
+	__typeof__(DNSServiceBrowse) *service_browse;
+	__typeof__(DNSServiceResolve) *service_resolve;
+	__typeof__(DNSServiceGetAddrInfo) *get_addr_info;
+	__typeof__(TXTRecordCreate) *txt_create;
+	__typeof__(TXTRecordSetValue) *txt_set_value;
+	__typeof__(TXTRecordDeallocate) *txt_deallocate;
+	__typeof__(TXTRecordContainsKey) *txt_contains_key;
+	__typeof__(TXTRecordGetValuePtr) *txt_get_value;
+	__typeof__(TXTRecordGetLength) *txt_get_length;
+	__typeof__(TXTRecordGetBytesPtr) *txt_get_bytes;
+};
+
+struct mdnss_discovery_info {
+	char *type;
+	char *name;
+	char *domain;
+	char *host_name;
+	char *bskeyhash;
+	char ipaddr[100];
+	uint16_t port;
+	uint32_t ifindex;
+};
+#endif /* ANDROID_MDNS */
 
 struct sigma_dut {
 	const char *main_ifname;
@@ -1137,6 +1183,14 @@ struct sigma_dut {
 	int rnm_mfp;
 	struct device_pairing_info dev_info;
 	struct peer_pairing_info peer_info;
+#ifdef ANDROID_MDNS
+	DNSServiceRef mdns_service;
+	void *mdnssd_so;
+	struct mdnssd_apis mdnssd;
+	struct mdnss_discovery_info mdns_discover;
+#endif /* ANDROID_MDNS */
+	char host_name[100];
+	int sta_roaming_disabled;
 };
 
 
@@ -1335,6 +1389,7 @@ int get_wps_forced_version(struct sigma_dut *dut, const char *str);
 int base64_encode(const char *src, size_t len, char *out, size_t out_len);
 unsigned char * base64_decode(const char *src, size_t len, size_t *out_len);
 int random_get_bytes(char *buf, size_t len);
+int random_mac_addr(u8 *addr);
 int get_enable_disable(const char *val);
 int wcn_driver_cmd(const char *ifname, char *buf);
 
@@ -1418,5 +1473,12 @@ int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
 void kill_pid(struct sigma_dut *dut, const char *pid_file);
 int get_ip_addr(const char *ifname, int ipv6, char *buf, size_t len);
 bool is_6ghz_freq(int freq);
+
+enum sigma_cmd_result dev_start_test_log(struct sigma_dut *dut,
+					 struct sigma_conn *conn,
+					 struct sigma_cmd *cmd);
+
+/* dnssd.c */
+int mdnssd_init(struct sigma_dut *dut);
 
 #endif /* SIGMA_DUT_H */
