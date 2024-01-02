@@ -146,9 +146,14 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 			return;
 		}
 #else /* ANDROID */
-		snprintf(buf, sizeof(buf),
+		if (access("/usr/sbin/dhcpcd", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/usr/sbin/dhcpcd -KL %s",
+				 group_ifname);
+		} else {
+			snprintf(buf, sizeof(buf),
 			 "dhclient -nw -pf /var/run/dhclient-%s.pid %s",
 			 group_ifname, group_ifname);
+		}
 #endif /* ANDROID */
 	}
 
