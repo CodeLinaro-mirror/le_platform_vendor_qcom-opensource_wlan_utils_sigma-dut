@@ -124,7 +124,7 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 			 GO_IP_ADDR);
 		run_system(dut, buf);
 		snprintf(buf, sizeof(buf),
-			 "/system/bin/dnsmasq -x /data/dnsmasq.pid --no-resolv --no-poll --dhcp-range=%s,%s,1h",
+			 "/usr/bin/dnsmasq -x /data/dnsmasq.pid --no-resolv --no-poll --dhcp-range=%s,%s,1h",
 			 START_IP_RANGE, END_IP_RANGE);
 	} else {
 #ifdef ANDROID
@@ -146,9 +146,14 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 			return;
 		}
 #else /* ANDROID */
-		snprintf(buf, sizeof(buf),
+		if (access("/usr/sbin/dhcpcd", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/usr/sbin/dhcpcd -KL %s",
+				 group_ifname);
+		} else {
+			snprintf(buf, sizeof(buf),
 			 "dhclient -nw -pf /var/run/dhclient-%s.pid %s",
 			 group_ifname, group_ifname);
+		}
 #endif /* ANDROID */
 	}
 
@@ -238,12 +243,13 @@ static void * wpa_event_recv(void *ptr)
 		NULL
 	};
 
-	ctrl = open_wpa_mon(dut->p2p_ifname);
-	if (!ctrl) {
-		sigma_dut_print(dut, DUT_MSG_ERROR,
-				"Failed to open wpa_supplicant monitor connection");
-		return NULL;
-	}
+	/* wpa_supplicant maybe started after this thread func, so wait
+	 * until it's available
+	 */
+	do {
+		ctrl = open_wpa_mon("wlan0");
+		usleep(100000);
+	} while (!ctrl);
 
 	for (i = 0; events[i]; i++) {
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
