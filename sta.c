@@ -10209,6 +10209,7 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 					  buf, sizeof(buf)));
 #endif /* ANDROID */
 
+	start_sta_mode(dut);
 	if (dut->station_ifname_2g &&
 	    strcmp(dut->station_ifname_2g, intf) == 0)
 		dut->use_5g = 0;
