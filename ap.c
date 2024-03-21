@@ -7894,8 +7894,8 @@ get_driver_ap_tx_stbc_capab(struct sigma_dut *dut)
 			VALUE_ENABLED : VALUE_DISABLED;
 #endif /* NL80211_SUPPORT */
 
-	/* Assume supported by default */
-	return VALUE_ENABLED;
+	/* Assume not supported by default */
+	return VALUE_DISABLED;
 }
 
 
