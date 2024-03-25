@@ -118,14 +118,36 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 {
 #ifdef __linux__
 	char buf[200];
+	FILE *f;
 
 	if (go) {
 		snprintf(buf, sizeof(buf), "ifconfig %s %s", group_ifname,
 			 GO_IP_ADDR);
 		run_system(dut, buf);
-		snprintf(buf, sizeof(buf),
+		if (access("/usr/bin/dnsmasq", F_OK) != -1) {
+			snprintf(buf, sizeof(buf),
 			 "/usr/bin/dnsmasq -x /data/dnsmasq.pid --no-resolv --no-poll --dhcp-range=%s,%s,1h",
 			 START_IP_RANGE, END_IP_RANGE);
+		} else if (access("/usr/sbin/udhcpd", F_OK) != -1) {
+			f = fopen("/tmp/udhcpd.conf", "w");
+			if (f == NULL)
+				return -1;
+			fprintf(f, "start 192.168.43.20\n");
+			fprintf(f, "end 192.168.43.254\n");
+			fprintf(f, "interface %s\n", group_ifname);
+			fprintf(f, "opt router 192.168.43.1\n");
+			fprintf(f, "opt     dns     192.168.43.1\n");
+			fprintf(f, "option  subnet  255.255.255.0\n");
+			fprintf(f, "option  domain  atherosowl.com\n");
+			fprintf(f, "option  lease   864000\n");
+			fclose(f);
+			run_system(dut, "touch /var/lib/misc/udhcpd.leases");
+			snprintf(buf, sizeof(buf), "udhcpd -fS /tmp/udhcpd.conf &");
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"DHCP server program missing");
+			return;
+		}
 	} else {
 #ifdef ANDROID
 		if (access("/system/bin/dhcpcd", F_OK) != -1) {
@@ -148,6 +170,9 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 #else /* ANDROID */
 		if (access("/usr/sbin/dhcpcd", F_OK) != -1) {
 			snprintf(buf, sizeof(buf), "/usr/sbin/dhcpcd -KL %s",
+				 group_ifname);
+		} else if (access("/sbin/udhcpc", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/sbin/udhcpc -i %s",
 				 group_ifname);
 		} else {
 			snprintf(buf, sizeof(buf),
