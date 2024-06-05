@@ -2,7 +2,7 @@
  * Sigma Control API DUT (station/AP)
  * Copyright (c) 2010, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2019, The Linux Foundation
+ * Copyright (c) 2018-2020, The Linux Foundation
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -12,6 +12,8 @@
 
 #define TG_MAX_CLIENTS_CONNECTIONS 1
 
+/* To send periodic data for VO-Enterprise tests */
+extern int sigma_periodic_data;
 
 static enum sigma_cmd_result cmd_traffic_agent_config(struct sigma_dut *dut,
 						      struct sigma_conn *conn,
@@ -341,7 +343,7 @@ static int set_socket_prio(struct sigma_stream *s)
 	case SIGMA_TC_VOICE:
 		if (s->user_priority_set) {
 			if (s->user_priority == 6)
-				tos = 48 << 2;
+				tos = 46 << 2;
 			else if (s->user_priority == 7)
 				tos = 56 << 2;
 			else
@@ -564,6 +566,107 @@ static void send_file(struct sigma_stream *s)
 	free(pkt);
 }
 
+static void send_periodic_data(struct sigma_stream *s)
+{
+	char *pkt;
+	struct timeval stop, now, start;
+	int res;
+	unsigned int counter = 0, total_sleep_usec = 0, total_pkts;
+	int sleep_usec = 0;
+
+	if (s->duration <= 0 || s->frame_rate < 0 || s->payload_size < 20)
+		return;
+
+	pkt = malloc(s->payload_size);
+	if (pkt == NULL)
+		return;
+	memset(pkt, 1, s->payload_size);
+	strlcpy(pkt, "1345678", s->payload_size);
+
+	if (s->frame_rate == 0 && s->no_timestamps) {
+		send_file_fast(s, pkt);
+		free(pkt);
+		return;
+	}
+
+	gettimeofday(&stop, NULL);
+	stop.tv_sec += s->duration;
+
+	total_pkts = s->duration * s->frame_rate;
+
+	gettimeofday(&start, NULL);
+	while (!s->stop) {
+		counter++;
+		WPA_PUT_BE32(&pkt[8], counter);
+
+		if (sleep_usec) {
+			usleep(sleep_usec);
+			total_sleep_usec += sleep_usec;
+		}
+		gettimeofday(&now, NULL);
+
+		if (now.tv_sec > stop.tv_sec ||
+		    (now.tv_sec == stop.tv_sec && now.tv_usec >= stop.tv_usec))
+			break;
+
+		if (s->frame_rate && (unsigned int) s->tx_frames >= total_pkts)
+			break;
+
+		WPA_PUT_BE32(&pkt[12], now.tv_sec);
+		WPA_PUT_BE32(&pkt[16], now.tv_usec);
+
+		s->tx_act_frames++;
+		res = send(s->sock, pkt, s->payload_size, 0);
+		if (res >= 0) {
+			s->tx_frames++;
+			s->tx_payload_bytes += res;
+		} else {
+			switch (errno) {
+			case EAGAIN:
+			case ENOBUFS:
+				usleep(1000);
+				break;
+			case ECONNRESET:
+			case EPIPE:
+				s->stop = 1;
+				break;
+			default:
+				perror("send");
+				break;
+			}
+		}
+
+		if (s->frame_rate == 0)
+			sleep_usec = 0;
+		else {
+			struct timeval tmp;
+			int diff, duration, pkt_spacing;
+
+			gettimeofday(&now, NULL);
+			timersub(&now, &start, &tmp);
+
+			pkt_spacing = 1000000 / s->frame_rate ;
+			diff = tmp.tv_sec * 1000000 + tmp.tv_usec;
+			duration = (pkt_spacing) * s->tx_frames;
+
+			if (duration > diff) {
+				if ((duration - diff) > pkt_spacing)
+					sleep_usec = (total_sleep_usec +
+						      (duration - diff)) / s->tx_frames;
+				else
+					sleep_usec = duration - diff;
+			} else {
+				sleep_usec = 0;
+			}
+		}
+	}
+
+	sigma_dut_print(s->dut, DUT_MSG_DEBUG,
+			"send_periodic_data: counter %u s->tx_frames %d total_sleep_usec %u",
+			counter, s->tx_frames, total_sleep_usec);
+
+	free(pkt);
+}
 
 static void send_transaction(struct sigma_stream *s)
 {
@@ -679,7 +782,10 @@ static void * send_thread(void *ctx)
 		send_file(s);
 		break;
 	case SIGMA_PROFILE_IPTV:
-		send_file(s);
+		if (sigma_periodic_data)
+			send_periodic_data(s);
+		else
+			send_file(s);
 		break;
 	case SIGMA_PROFILE_TRANSACTION:
 		send_transaction(s);
@@ -1205,7 +1311,7 @@ cmd_traffic_agent_receive_start(struct sigma_dut *dut, struct sigma_conn *conn,
 		 */
 		s->dut = dut;
 		val = get_param(cmd, "Interface");
-		strlcpy(s->ifname, (val ? val : get_station_ifname()),
+		strlcpy(s->ifname, (val ? val : get_station_ifname(dut)),
 			sizeof(s->ifname));
 
 		sigma_dut_print(dut, DUT_MSG_DEBUG, "Traffic agent: start "
@@ -1230,8 +1336,8 @@ static void write_frame_stats(struct sigma_dut *dut, struct sigma_stream *s,
 	FILE *f;
 	unsigned int i;
 
-	snprintf(fname, sizeof(fname), SIGMA_TMPDIR "/e2e%u-%d.txt",
-		 (unsigned int) time(NULL), id);
+	snprintf(fname, sizeof(fname), "%s/e2e%u-%d.txt",
+		 dut->sigma_tmpdir, (unsigned int) time(NULL), id);
 	f = fopen(fname, "w");
 	if (f == NULL) {
 		sigma_dut_print(dut, DUT_MSG_INFO, "Could not write %s",
