@@ -591,8 +591,12 @@ static void handle_term(int sig)
 {
 	struct sigma_dut *dut = &sigma_dut;
 
+	printf("handle_term(sig=%d)\n", sig);
 	if (dut->sta_2g_started || dut->sta_5g_started)
 		stop_sta_mode(dut);
+	if (dut->hostapd_running && dut->use_hostapd_pid_file)
+		kill_hostapd_process_pid(dut);
+
 	stop_loop = 1;
 	stop_event_thread();
 	printf("sigma_dut terminating\n");
@@ -837,6 +841,26 @@ static int get_nl80211_config_enable_option(struct sigma_dut *dut)
 }
 
 
+static void set_host_name(struct sigma_dut *dut)
+{
+	FILE *f;
+	size_t len;
+
+	strlcpy(dut->host_name, "no_name", sizeof(dut->host_name));
+	f = popen("hostname", "r");
+	if (!f)
+		return;
+
+	len = fread(dut->host_name, 1, sizeof(dut->host_name) - 1, f);
+	pclose(f);
+
+	if (len == 0)
+		return;
+
+	dut->host_name[len - 1] = '\0';
+}
+
+
 static void set_defaults(struct sigma_dut *dut)
 {
 	dut->debug_level = DUT_MSG_INFO;
@@ -864,6 +888,7 @@ static void set_defaults(struct sigma_dut *dut)
 	dut->dscp_use_iptables = 1;
 #endif /* ANDROID */
 	dut->autoconnect_default = 1;
+	set_host_name(dut);
 }
 
 
