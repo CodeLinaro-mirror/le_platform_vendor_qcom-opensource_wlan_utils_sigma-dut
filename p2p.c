@@ -118,14 +118,36 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 {
 #ifdef __linux__
 	char buf[200];
+	FILE *f;
 
 	if (go) {
 		snprintf(buf, sizeof(buf), "ifconfig %s %s", group_ifname,
 			 GO_IP_ADDR);
 		run_system(dut, buf);
-		snprintf(buf, sizeof(buf),
+		if (access("/usr/bin/dnsmasq", F_OK) != -1) {
+			snprintf(buf, sizeof(buf),
 			 "/usr/bin/dnsmasq -x /data/dnsmasq.pid --no-resolv --no-poll --dhcp-range=%s,%s,1h",
 			 START_IP_RANGE, END_IP_RANGE);
+		} else if (access("/usr/sbin/udhcpd", F_OK) != -1) {
+			f = fopen("/tmp/udhcpd.conf", "w");
+			if (f == NULL)
+				return -1;
+			fprintf(f, "start 192.168.43.20\n");
+			fprintf(f, "end 192.168.43.254\n");
+			fprintf(f, "interface %s\n", group_ifname);
+			fprintf(f, "opt router 192.168.43.1\n");
+			fprintf(f, "opt     dns     192.168.43.1\n");
+			fprintf(f, "option  subnet  255.255.255.0\n");
+			fprintf(f, "option  domain  atherosowl.com\n");
+			fprintf(f, "option  lease   864000\n");
+			fclose(f);
+			run_system(dut, "touch /var/lib/misc/udhcpd.leases");
+			snprintf(buf, sizeof(buf), "udhcpd -fS /tmp/udhcpd.conf &");
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"DHCP server program missing");
+			return;
+		}
 	} else {
 #ifdef ANDROID
 		if (access("/system/bin/dhcpcd", F_OK) != -1) {
@@ -146,9 +168,17 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 			return;
 		}
 #else /* ANDROID */
-		snprintf(buf, sizeof(buf),
+		if (access("/usr/sbin/dhcpcd", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/usr/sbin/dhcpcd -KL %s",
+				 group_ifname);
+		} else if (access("/sbin/udhcpc", F_OK) != -1) {
+			snprintf(buf, sizeof(buf), "/sbin/udhcpc -i %s",
+				 group_ifname);
+		} else {
+			snprintf(buf, sizeof(buf),
 			 "dhclient -nw -pf /var/run/dhclient-%s.pid %s",
 			 group_ifname, group_ifname);
+		}
 #endif /* ANDROID */
 	}
 
@@ -242,7 +272,7 @@ static void * wpa_event_recv(void *ptr)
 	 * until it's available
 	 */
 	do {
-		ctrl = open_wpa_mon("wlan0");
+		ctrl = open_wpa_mon(dut->p2p_ifname);
 		usleep(100000);
 	} while (!ctrl);
 
@@ -642,6 +672,8 @@ cmd_sta_get_p2p_dev_address(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *intf = get_param(cmd, "interface");
 	char buf[100], resp[200];
 
+	if (intf == NULL)
+		return -1;
 	start_sta_mode(dut);
 	if (get_wpa_status(intf, "p2p_device_address", buf, sizeof(buf)) < 0) {
 		send_resp(dut, conn, SIGMA_ERROR, NULL);
@@ -1429,7 +1461,7 @@ static enum sigma_cmd_result cmd_sta_p2p_dissolve(struct sigma_dut *dut,
 	struct wfa_cs_p2p_group *grp;
 	char buf[128];
 
-	if (grpid == NULL)
+	if (grpid == NULL || intf == NULL)
 		return -1;
 
 	grp = p2p_group_get(dut, grpid);
@@ -1468,7 +1500,7 @@ cmd_sta_send_p2p_invitation_req(struct sigma_dut *dut, struct sigma_conn *conn,
 	struct wpa_ctrl *ctrl;
 	int res;
 
-	if (devid == NULL || grpid == NULL)
+	if (intf == NULL || devid == NULL || grpid == NULL)
 		return -1;
 
 	if (reinvoke && atoi(reinvoke)) {
@@ -1558,7 +1590,7 @@ cmd_sta_accept_p2p_invitation_req(struct sigma_dut *dut,
 	const char *reinvoke = get_param(cmd, "Reinvoke");
 	char buf[100];
 
-	if (devid == NULL || grpid == NULL)
+	if (intf == NULL || devid == NULL || grpid == NULL)
 		return -1;
 
 	if (reinvoke && atoi(reinvoke)) {
@@ -1603,7 +1635,7 @@ cmd_sta_send_p2p_provision_dis_req(struct sigma_dut *dut,
 	char buf[256];
 	char *method;
 
-	if (conf_method == NULL || devid == NULL)
+	if (intf == NULL || conf_method == NULL || devid == NULL)
 		return -1;
 
 	if (strcasecmp(conf_method, "Display") == 0)
@@ -1670,6 +1702,8 @@ static enum sigma_cmd_result cmd_sta_wps_read_pin(struct sigma_dut *dut,
 	char pin[9], addr[20];
 	char resp[100];
 
+	if (intf == NULL)
+		return -1;
 	if (get_wpa_status(intf, "address", addr, sizeof(addr)) < 0 ||
 	    get_wps_pin_from_mac(dut, addr, pin, sizeof(pin)) < 0) {
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
@@ -1809,6 +1843,8 @@ enum sigma_cmd_result cmd_sta_p2p_reset(struct sigma_dut *dut,
 	struct wfa_cs_p2p_group *grp, *prev;
 	char buf[256];
 
+	if (intf == NULL)
+		return -1;
 #ifdef MIRACAST
 	if (dut->program == PROGRAM_WFD ||
 	    dut->program == PROGRAM_DISPLAYR2)
@@ -2089,7 +2125,7 @@ cmd_sta_send_service_discovery_req(struct sigma_dut *dut,
 	const char *devid = get_param(cmd, "P2PDevID");
 	char buf[128];
 
-	if (devid == NULL)
+	if (intf == NULL || devid == NULL)
 		return -1;
 
 	snprintf(buf, sizeof(buf), "P2P_SERV_DISC_REQ %s 02000001",
@@ -2207,6 +2243,8 @@ static int nfc_write_p2p_select(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *ifname = get_param(cmd, "Interface");
 	char buf[300];
 
+	if (ifname == NULL)
+		return -1;
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
@@ -2256,6 +2294,8 @@ static int nfc_write_config_token(struct sigma_dut *dut,
 	const char *intf = get_param(cmd, "Interface");
 	char buf[200];
 
+	if (intf == NULL)
+		return -1;
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 	unlink("nfc-success");
@@ -2338,6 +2378,8 @@ static int nfc_read_tag(struct sigma_dut *dut,
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
+	if (intf == NULL)
+		return -1;
 	ctrl = open_wpa_mon(intf);
 	if (ctrl == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to open "
@@ -2397,6 +2439,8 @@ static int nfc_wps_read_tag(struct sigma_dut *dut,
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
+	if (intf == NULL)
+		return -1;
 	ctrl = open_wpa_mon(intf);
 	if (ctrl == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to open "
@@ -2536,6 +2580,8 @@ static int nfc_wps_read_passwd(struct sigma_dut *dut,
 	char buf[1000];
 	const char *keymgmt, *cipher;
 
+	if (intf == NULL)
+		return -1;
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
@@ -2665,6 +2711,8 @@ static int nfc_wps_read_config(struct sigma_dut *dut,
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
+	if (intf == NULL)
+		return -1;
 	ctrl = open_wpa_mon(intf);
 	if (ctrl == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to open "
@@ -2703,6 +2751,8 @@ static int nfc_wps_connection_handover(struct sigma_dut *dut,
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
+	if (intf == NULL)
+		return -1;
 	ctrl = open_wpa_mon(intf);
 	if (ctrl == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to open "
@@ -2791,6 +2841,8 @@ static int nfc_p2p_connection_handover(struct sigma_dut *dut,
 	run_system(dut, "killall wps-nfc.py");
 	run_system(dut, "killall p2p-nfc.py");
 
+	if (intf == NULL)
+		return -1;
 	ctrl = open_wpa_mon(intf);
 	if (ctrl == NULL) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to open "
@@ -2864,7 +2916,7 @@ static enum sigma_cmd_result cmd_sta_nfc_action(struct sigma_dut *dut,
 	const char *oper_chn = get_param(cmd, "OPER_CHN");
 	char buf[256];
 
-	if (oper == NULL)
+	if (intf == NULL || oper == NULL)
 		return -1;
 
 	if (ssid_param)

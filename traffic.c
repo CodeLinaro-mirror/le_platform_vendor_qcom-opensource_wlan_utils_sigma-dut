@@ -157,7 +157,7 @@ static enum sigma_cmd_result cmd_traffic_send_ping(struct sigma_dut *dut,
 		"ping%s%s -c %d%s -s %d%s -q%s %s > %s"
 		"/sigma_dut-ping.%d &\n"
 		"echo $! > %s/sigma_dut-ping-pid.%d\n",
-		type == 2 ? "6" : "", broadcast ? " -b" : "",
+		type == 2 ? " -6" : "", broadcast ? " -b" : "",
 		pkts, int_arg, size, extra,
 		intf_arg, dst, dut->sigma_tmpdir, id, dut->sigma_tmpdir, id);
 
