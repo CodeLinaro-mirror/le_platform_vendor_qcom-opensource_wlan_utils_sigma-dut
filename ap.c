@@ -26,6 +26,7 @@
 #include <net/if.h>
 #include "wpa_ctrl.h"
 #include "wpa_helpers.h"
+#include "nl80211_copy.h"
 #ifdef ANDROID
 #include <hardware_legacy/wifi.h>
 #include <grp.h>
@@ -147,6 +148,7 @@ static int ap_ft_enabled(struct sigma_dut *dut)
 		 ((1 << AKM_FT_EAP) |
 		  (1 << AKM_FT_PSK) |
 		  (1 << AKM_FT_SAE) |
+		  (1 << AKM_FT_SAE_EXT_KEY) |
 		  (1 << AKM_FT_SUITE_B) |
 		  (1 << AKM_FT_FILS_SHA256) |
 		  (1 << AKM_FT_FILS_SHA384)));
@@ -163,7 +165,7 @@ static enum sigma_cmd_result cmd_ap_ca_version(struct sigma_dut *dut,
 }
 
 
-static void kill_hostapd_process_pid(struct sigma_dut *dut)
+void kill_hostapd_process_pid(struct sigma_dut *dut)
 {
 	FILE *f;
 	int pid, res;
@@ -276,6 +278,110 @@ void ath_set_cts_width(struct sigma_dut *dut, const char *ifname,
 }
 
 
+/**
+ * enum qca_ap_helper_config_params - This helper enum defines
+ * the config parameters which can be delivered to the AP mode driver using
+ * the vendor nl80211 path.
+ */
+enum qca_ap_helper_config_params {
+	/* For the attribute QCA_WLAN_VENDOR_ATTR_CONFIG_DYNAMIC_BW */
+	AP_SET_DYN_BW,
+
+	/* For the attribute QCA_WLAN_VENDOR_ATTR_CONFIG_LDPC */
+	AP_SET_LDPC,
+};
+
+
+static int ap_config_params(struct sigma_dut *dut, const char *intf,
+			    enum qca_ap_helper_config_params config_cmd,
+			    int value)
+{
+#ifdef NL80211_SUPPORT
+	struct nl_msg *msg;
+	int ret;
+	struct nlattr *params;
+	int ifindex;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Interface %s does not exist",
+				__func__, intf);
+		return -1;
+	}
+
+	if (!(msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+				    NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)))
+		goto fail;
+
+	switch (config_cmd) {
+	case AP_SET_DYN_BW:
+		if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_DYNAMIC_BW,
+			       value))
+			goto fail;
+		break;
+	case AP_SET_LDPC:
+		if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_CONFIG_LDPC, value))
+			goto fail;
+		break;
+	}
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+		return ret;
+	}
+
+	return 0;
+
+fail:
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"%s: err in adding vendor_cmd and vendor_data",
+			__func__);
+	nlmsg_free(msg);
+#endif /* NL80211_SUPPORT */
+	return -1;
+}
+
+
+void wcn_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
+						   const char *val)
+{
+	int set_val;
+	int res;
+
+	if (strcasecmp(val, "enable") == 0) {
+		dut->ap_dyn_bw_sig = VALUE_ENABLED;
+		set_val = 1;
+	} else if (strcasecmp(val, "disable") == 0) {
+		dut->ap_dyn_bw_sig = VALUE_DISABLED;
+		set_val = 0;
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported DYN_BW_SGL");
+		return;
+	}
+
+	res = ap_config_params(dut, ifname, AP_SET_DYN_BW, set_val);
+	if (res) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Set DYN_BW_SGL using NL failed - try iwpriv");
+		if (run_iwpriv(dut, ifname, "cwmenable %d", set_val) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"iwpriv cwmenable %d failed",
+					set_val);
+		}
+	}
+}
+
+
 void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 			   const char *val)
 {
@@ -302,9 +408,25 @@ void ath_config_dyn_bw_sig(struct sigma_dut *dut, const char *ifname,
 
 static void wcn_config_ap_ldpc(struct sigma_dut *dut, const char *ifname)
 {
-	if (dut->ap_ldpc == VALUE_NOT_SET)
+	int set_val;
+	int res;
+
+	if (dut->ap_ldpc == VALUE_ENABLED)
+		set_val = 1;
+	else if (dut->ap_ldpc == VALUE_DISABLED)
+		set_val = 0;
+	else
 		return;
-	run_iwpriv(dut, ifname, "ldpc %d", dut->ap_ldpc != VALUE_DISABLED);
+
+	res = ap_config_params(dut, ifname, AP_SET_LDPC, set_val);
+	if (res) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Setting of LDPC using NL failed - try iwpriv");
+		if (run_iwpriv(dut, ifname, "lpdc %d", set_val) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"iwpriv ldpc %d failed", set_val);
+		}
+	}
 }
 
 
@@ -481,6 +603,8 @@ static enum ap_mode get_mode(const char *str)
 		return AP_11ad;
 	else if (strcasecmp(str, "11ax") == 0)
 		return AP_11ax;
+	else if (strcasecmp(str, "11be") == 0)
+		return AP_11be;
 	else
 		return AP_inval;
 }
@@ -492,6 +616,7 @@ static int run_hostapd_cli(struct sigma_dut *dut, char *buf)
 	const char *bin;
 	enum driver_type drv = get_driver_type(dut);
 	char *sigma_hapd_file = sigma_hapd_ctrl;
+	const char *ifname = get_hostapd_ifname(dut);
 
 	if (file_exists("hostapd_cli"))
 		bin = "./hostapd_cli";
@@ -512,10 +637,11 @@ static int run_hostapd_cli(struct sigma_dut *dut, char *buf)
 	}
 
 	if (sigma_hapd_file)
-		snprintf(command, sizeof(command), "%s -p %s %s",
-			 bin, sigma_hapd_file, buf);
+		snprintf(command, sizeof(command), "%s -p %s -i %s %s",
+			 bin, sigma_hapd_file, ifname, buf);
 	else
-		snprintf(command, sizeof(command), "%s %s", bin, buf);
+		snprintf(command, sizeof(command), "%s -i %s %s", bin, ifname,
+			 buf);
 	return run_system(dut, command);
 }
 
@@ -664,6 +790,64 @@ static void get_he_mcs_nssmap(uint8_t *mcsnssmap, uint8_t nss,
 }
 
 
+#ifdef NL80211_SUPPORT
+static int wcn_set_txbf_periodic_ndp(struct sigma_dut *dut, const char *intf,
+				     uint8_t cfg_val)
+{
+	struct nl_msg *msg;
+	struct nlattr *params;
+	int ifindex, ret;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Index for interface %s not found",
+				__func__, intf);
+		return -1;
+	}
+
+	msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+			      NL80211_CMD_VENDOR);
+	if (!msg) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding vendor_cmd", __func__);
+		return -1;
+	}
+
+	if (nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding vendor_attr", __func__);
+		nlmsg_free(msg);
+		return -1;
+	}
+
+	params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!params ||
+	    nla_put_u8(msg,
+		    QCA_WLAN_VENDOR_ATTR_CONFIG_BEAMFORMER_PERIODIC_SOUNDING,
+		    cfg_val)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding vendor_data", __func__);
+		nlmsg_free(msg);
+		return -1;
+	}
+
+	nla_nest_end(msg, params);
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d (%s)",
+				__func__, ret, strerror(-ret));
+		return ret;
+	}
+
+	return 0;
+}
+#endif /* NL80211_SUPPORT */
+
+
 static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 						 struct sigma_conn *conn,
 						 struct sigma_cmd *cmd)
@@ -674,6 +858,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	unsigned int wlan_tag = 1;
 	const char *ifname = get_main_ifname(dut);
 	char buf[128];
+	int subeamformermode = 0;
 
 	/* Allow program to be overridden if specified in the ap_set_wireless
 	 * to support some 60 GHz test scripts where the program may be 60 GHz
@@ -872,6 +1057,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		else if (dut->ap_channel >= 36 && dut->ap_channel <= 171)
 			dut->use_5g = 1;
 		break;
+	case AP_11be:
 	case AP_11ad:
 	case AP_inval:
 		break;
@@ -1157,6 +1343,8 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 			dut->ap_chwidth = AP_80;
 		else if (strcasecmp(val, "160") == 0)
 			dut->ap_chwidth = AP_160;
+		else if (strcasecmp(val, "320") == 0)
+			dut->ap_chwidth = AP_320;
 		else if (strcasecmp(val, "80plus80") == 0) {
 			dut->ap_80plus80 = 1;
 			dut->ap_chwidth = AP_80_80;
@@ -1210,7 +1398,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 			break;
 		case DRIVER_WCN:
 		case DRIVER_LINUX_WCN:
-			ath_config_dyn_bw_sig(dut, ifname, val);
+			wcn_config_dyn_bw_sig(dut, ifname, val);
 			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -1323,6 +1511,13 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		dut->ap_txBF = strcasecmp(val, "enable") == 0;
 		dut->he_sounding = VALUE_DISABLED;
 		dut->he_set_sta_1x1 = VALUE_ENABLED;
+#ifdef NL80211_SUPPORT
+		if (dut->ap_txBF && get_driver_type(dut) == DRIVER_LINUX_WCN &&
+		    wcn_set_txbf_periodic_ndp(dut, get_main_ifname(dut), 1)) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set NDP periodicity");
+		}
+#endif /* NL80211_SUPPORT */
 	}
 
 	val = get_param(cmd, "MU_TxBF");
@@ -1966,6 +2161,158 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	if (val)
 		dut->ap_ocvc = atoi(val);
 
+	val = get_param(cmd, "UnsolicitedProbeResp");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_unsolicited_proberesp = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_unsolicited_proberesp = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported unsolicited proberesp");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "Cadence_UnsolicitedProbeResp");
+	if (val)
+		dut->ap_cad_unsolicited_proberesp = atoi(val);
+
+	val = get_param(cmd, "ActiveInd_UnsolicitedProbeResp");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_activeind_proberesp = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_activeind_proberesp = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported active unsolicited proberesp");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "RSNXE");
+	if (val) {
+		if (strcasecmp(val, "exclude") == 0) {
+			dut->ap_6g_legacy_security = VALUE_ENABLED;
+		} else if (strcasecmp(val, "include") == 0) {
+			dut->ap_6g_legacy_security = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported legacy security");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "FullBW_ULMUMIMO");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_fullbw_ulmumimo = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_fullbw_ulmumimo = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported full BW ulmumimo");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "TWTInfoFrameRx");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_twtinfoframerx = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_twtinfoframerx = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported twtinfoframerx");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "OMCtrl_ULMUDataDisableRx");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_ulmudata_disablerx = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_ulmudata_disablerx = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported ulmudatadisablerx");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "BroadcastTWT");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_btwt = VALUE_ENABLED;
+			dut->ap_txBF = 0;
+			dut->ap_mu_txBF = 0;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_btwt = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported BroadcastTWT");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "SUBeamformerMode");
+	if (val)
+		subeamformermode = atoi(val);
+
+	val = get_param(cmd, "MUBeamformerMode");
+	if (val) {
+		dut->ap_txBF = 1;
+		dut->ap_mu_txBF = 1;
+	}
+
+	val = get_param(cmd, "NonTrigger_TxBF");
+	if (val) {
+		if (strcasecmp(val, "Enable") == 0) {
+			if (subeamformermode == 1)
+				dut->nontrigger_txbf = VALUE_ENABLED;
+		}
+	}
+
+	val = get_param(cmd, "PreamblePunctTx");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0) {
+			dut->ap_preamblepunct = VALUE_ENABLED;
+		} else if (strcasecmp(val, "disable") == 0) {
+			dut->ap_preamblepunct = VALUE_DISABLED;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported PreamblePunctTx");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "ForceEHTTXMCS");
+	if (val) {
+		dut->ap_fixed_rate = 1;
+		dut->eht_txmcs = atoi(val);
+	}
+
+	val = get_param(cmd, "BA_Param_AMSDU_Support");
+	if (val)
+		dut->ap_addba_amsdu = atoi(val);
+
+	val = get_param(cmd, "EHT_OMControl");
+	if (val) {
+		if (strcasecmp(val, "enable") == 0)
+			dut->eht_omctrl = VALUE_ENABLED;
+	}
+
+	val = get_param(cmd, "TxEMLOMN");
+	if (val) {
+		if (strcasecmp(val, "Disable") == 0)
+			dut->eht_txemlomn = VALUE_DISABLED;
+		else if (strcasecmp(val, "enable") == 0)
+			dut->eht_txemlomn = VALUE_ENABLED;
+	}
+
 	return SUCCESS_SEND_STATUS;
 }
 
@@ -2250,6 +2597,11 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 				   wlan_tag == 2) {
 				dut->ap_tag_key_mgmt[wlan_tag - 2] =
 					AP2_WPA2_OWE;
+			} else if ((strcasecmp(val, "WPA2-EAP") == 0 ||
+				    strcasecmp(val, "WPA2-Ent") == 0) &&
+				   wlan_tag == 2) {
+				dut->ap_tag_key_mgmt[wlan_tag - 2] =
+					AP2_WPA2_EAP;
 			} else {
 				send_resp(dut, conn, SIGMA_INVALID,
 					  "errorCode,Unsupported KEYMGNT");
@@ -2944,6 +3296,15 @@ static int owrt_ap_config_radio(struct sigma_dut *dut)
 			owrt_ap_set_radio(dut, radio_id[0], "htmode", "HT20");
 		}
 		break;
+	case AP_11be:
+		if (dut->ap_channel >= 36) {
+			owrt_ap_set_radio(dut, radio_id[0], "hwmode", "11bea");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", "EHT80");
+		} else {
+			owrt_ap_set_radio(dut, radio_id[0], "hwmode", "11beg");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", "EHT20");
+		}
+		break;
 	case AP_inval:
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"MODE NOT SPECIFIED!");
@@ -2991,6 +3352,19 @@ static int owrt_ap_config_radio(struct sigma_dut *dut)
 						  "htmode", "HT20");
 			}
 			break;
+		case AP_11be:
+			if (dut->ap_channel >= 36) {
+				owrt_ap_set_radio(dut, radio_id[1],
+						  "hwmode", "11bea");
+				owrt_ap_set_radio(dut, radio_id[1],
+						  "htmode", "EHT80");
+			} else {
+				owrt_ap_set_radio(dut, radio_id[1],
+						  "hwmode", "11beg");
+				owrt_ap_set_radio(dut, radio_id[1],
+						  "htmode", "EHT20");
+			}
+			break;
 		case AP_inval:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"MODE NOT SPECIFIED!");
@@ -3009,16 +3383,39 @@ static int owrt_ap_config_radio(struct sigma_dut *dut)
 
 	switch (dut->ap_chwidth) {
 		case AP_20:
-			owrt_ap_set_radio(dut, radio_id[0], "htmode", "HT20");
+			if (dut->ap_mode == AP_11be)
+				snprintf(buf, sizeof(buf), "%s", "EHT20");
+			else
+				snprintf(buf, sizeof(buf), "%s", "HT20");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", buf);
 			break;
 		case AP_40:
-			owrt_ap_set_radio(dut, radio_id[0], "htmode", "HT40");
+			if (dut->ap_mode == AP_11be)
+				snprintf(buf, sizeof(buf), "%s", "EHT40");
+			else
+				snprintf(buf, sizeof(buf), "%s", "HT40");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", buf);
 			break;
 		case AP_80:
-			owrt_ap_set_radio(dut, radio_id[0], "htmode", "HT80");
+			if (dut->ap_mode == AP_11be)
+				snprintf(buf, sizeof(buf), "%s", "EHT80");
+			else
+				snprintf(buf, sizeof(buf), "%s", "HT80");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", buf);
 			break;
 		case AP_160:
-			owrt_ap_set_radio(dut, radio_id[0], "htmode", "HT160");
+			if (dut->ap_mode == AP_11be)
+				snprintf(buf, sizeof(buf), "%s", "EHT160");
+			else
+				snprintf(buf, sizeof(buf), "%s", "HT160");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", buf);
+			break;
+		case AP_320:
+			if (dut->ap_mode == AP_11be)
+				snprintf(buf, sizeof(buf), "%s", "EHT320");
+			else
+				snprintf(buf, sizeof(buf), "%s", "HT320");
+			owrt_ap_set_radio(dut, radio_id[0], "htmode", buf);
 			break;
 		case AP_80_80:
 			owrt_ap_set_radio(dut, radio_id[0], "htmode", "HT80_80");
@@ -3073,6 +3470,11 @@ static int owrt_ap_config_radio(struct sigma_dut *dut)
 					  "'2 1'");
 		owrt_ap_set_qcawifi(dut, "ap_bss_color_collision_detection",
 				    "1");
+	}
+
+	if (dut->ap_btwt == VALUE_ENABLED) {
+		owrt_ap_set_qcawifi(dut, "twt_enable", "1");
+		owrt_ap_set_qcawifi(dut, "b_twt_enable", "1");
 	}
 
 	return 1;
@@ -4478,6 +4880,9 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 	else if (dut->ap_ocvc == 0)
 		owrt_ap_set_vap(dut, vap_count, "ocv", "0");
 
+	if (dut->ap_6g_legacy_security == VALUE_ENABLED)
+		owrt_ap_set_vap(dut, vap_id, "en_6g_sec_comp", "0");
+
 	return 1;
 }
 
@@ -5411,6 +5816,10 @@ static int append_hostapd_conf_hs2(struct sigma_dut *dut, FILE *f)
 			"venue_url=9:https://banana-republic-factory-store.r2m-testbed.wi-fi.org/floorplans/index.html\n"
 			"venue_url=10:https://bed-bath-and-beyond.r2m-testbed.wi-fi.org/floorplans/index.html\n"
 			);
+		break;
+	case 3:
+		fprintf(f,
+			"venue_url=1:http://the-great-mall.r2m-test bed.wi-fi.org/floorplans/index.html\n");
 		break;
 	}
 
@@ -6782,6 +7191,24 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		run_system_wrapper(dut,
 				   "wifitool %s setUnitTestCmd 0x48 2 63 1908",
 				   ifname);
+		if (dut->ap_twtresp == VALUE_ENABLED ||
+		    dut->device_type == AP_dut ||
+		    (dut->ap_btwt == VALUE_ENABLED &&
+		     dut->device_type == AP_testbed)) {
+			run_system_wrapper(
+				dut, "wifitool %s setUnitTestCmd 0x47 2 42 7",
+				ifname);
+			run_system_wrapper(
+				dut, "wifitool %s setUnitTestCmd 0x47 2 95 6",
+				ifname);
+			run_system_wrapper(
+				dut, "wifitool %s setUnitTestCmd 0x47 2 43 8",
+				ifname);
+			run_system_wrapper(
+				dut,
+				"wifitool %s setUnitTestCmd 0x48 2 63 1000",
+				ifname);
+		}
 	}
 
 	if (dut->ap_he_dlofdma == VALUE_ENABLED) {
@@ -6811,9 +7238,12 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		run_system_wrapper(dut,
 				   "wifitool %s setUnitTestCmd 0x47 2 29 0",
 				   ifname);
-		/* Enable to sort RU allocation */
-		run_system_wrapper(dut, "wifitool %s setUnitTestCmd 0x4b 2 2 1",
-				   ifname);
+		if (dut->ap_preamblepunct == VALUE_NOT_SET) {
+			/* Enable to sort RU allocation */
+			run_system_wrapper(
+				dut, "wifitool %s setUnitTestCmd 0x4b 2 2 1",
+				ifname);
+		}
 	}
 
 	if (dut->ap_numsounddim) {
@@ -6969,6 +7399,123 @@ static void ath_ap_set_params(struct sigma_dut *dut)
 		 */
 		run_iwpriv(dut, ifname, "he_sr_enable 1");
 	}
+
+	if (dut->ap_unsolicited_proberesp == VALUE_ENABLED) {
+		run_system_wrapper(dut, "cfg80211tool %s bcast_prbrsp_en 1",
+				   ifname);
+		sleep(2);
+	} else if (dut->ap_unsolicited_proberesp == VALUE_DISABLED) {
+		run_system_wrapper(dut, "cfg80211tool %s bcast_prbrsp_en 0",
+				   ifname);
+	}
+
+	if (dut->ap_activeind_proberesp == VALUE_ENABLED)
+		run_system_wrapper(dut,
+				   "cfg80211tool %s rnr_unsolicited_prb_resp_en 1",
+				   basedev);
+	else if (dut->ap_activeind_proberesp == VALUE_DISABLED)
+		run_system_wrapper(dut,
+				   "cfg80211tool %s rnr_unsolicited_prb_resp_en 0",
+				   basedev);
+
+	if (dut->ap_cad_unsolicited_proberesp) {
+		run_system_wrapper(dut, "cfg80211tool %s bcast_prbrsp_en 1 %d",
+				   ifname,
+				   dut->ap_cad_unsolicited_proberesp);
+		sleep(2);
+	}
+
+	if (dut->ap_fullbw_ulmumimo == VALUE_ENABLED) {
+		run_system_wrapper(dut, "cfg80211tool %s he_ul_mimo 1", ifname);
+		run_system_wrapper(dut, "cfg80211tool %s he_full_bw_ulmumimo 1",
+				   ifname);
+	} else if (dut->ap_fullbw_ulmumimo == VALUE_DISABLED) {
+		run_system_wrapper(dut, "cfg80211tool %s he_ul_mimo 0", ifname);
+		run_system_wrapper(dut, "cfg80211tool %s he_full_bw_ulmumimo 0",
+				   ifname);
+	}
+
+	if (dut->ap_twtinfoframerx == VALUE_ENABLED &&
+	    dut->device_type == AP_testbed) {
+		/* Disable UL triggers for testbed AP */
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x47 2 333 1",
+				   ifname);
+	}
+
+	if (dut->ap_ulmudata_disablerx == VALUE_ENABLED &&
+	    dut->device_type == AP_testbed)
+		run_iwpriv(dut, ifname, "he_ul_mu_data_dis_rx 1");
+
+	if (dut->ap_btwt == VALUE_ENABLED) {
+		/* Set 2 ms for SP command */
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 77 2 22 2000",
+				   ifname);
+		/* SIFS burst disabled to handle short SP */
+		run_system_wrapper(dut, "wifitool %s setUnitTestCmd 0x47 2 2 1",
+				   ifname);
+	}
+
+	if (dut->program == PROGRAM_EHT && dut->ap_mode == AP_11be) {
+		if (dut->ap_txBF) {
+			run_iwpriv(dut, ifname, "vhtsubfee 1");
+			run_iwpriv(dut, ifname, "vhtsubfer 1");
+			run_iwpriv(dut, ifname, "he_subfer 1");
+			run_iwpriv(dut, ifname, "he_subfee 1");
+			run_iwpriv(dut, ifname, "set_eht_su_bfmr 1");
+			run_iwpriv(dut, ifname, "set_eht_su_bfme 1");
+		}
+		if (dut->ap_mu_txBF) {
+			run_iwpriv(dut, ifname, "vhtmubfer 1");
+			run_iwpriv(dut, ifname, "vhtmubfee 1");
+			run_iwpriv(dut, ifname, "he_mubfer 1");
+			run_iwpriv(dut, ifname, "he_mubfee 1");
+			if (dut->ap_chwidth == AP_80)
+				run_iwpriv(dut, ifname, "set_eht_mu_bfmr 1");
+			else if (dut->ap_chwidth == AP_160)
+				run_iwpriv(dut, ifname, "set_eht_mu_bfmr 3");
+			else if (dut->ap_chwidth == AP_320)
+				run_iwpriv(dut, ifname, "set_eht_mu_bfmr 7");
+			else
+				run_iwpriv(dut, ifname, "set_eht_mu_bfmr 1");
+			run_iwpriv(dut, ifname, "set_eht_mubfee 1");
+		}
+	}
+
+	if (dut->ap_mu_txBF && dut->ap_txBF &&
+	    dut->ap_mbssid == VALUE_DISABLED && dut->program == PROGRAM_EHT) {
+		/* Disable partial sounding sequence */
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x47 2 112 0",
+				   ifname);
+	}
+
+	if (dut->eht_txmcs) {
+		run_iwpriv(dut, ifname, "eht_mcs %d", dut->eht_txmcs);
+		if (dut->ap_tx_streams)
+			run_iwpriv(dut, ifname, "nss %d", dut->ap_tx_streams);
+	}
+
+	if (dut->ap_addba_amsdu == 0 ||
+	    (dut->ap_amsdu == VALUE_DISABLED && dut->program == PROGRAM_EHT))
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x48 2 129 0",
+				   ifname);
+
+	if (dut->ap_amsdu == VALUE_ENABLED && dut->program == PROGRAM_EHT)
+		run_system_wrapper(dut,
+				   "wifitool %s setUnitTestCmd 0x48 2 129 1",
+				   ifname);
+
+	if (dut->eht_omctrl == VALUE_ENABLED)
+		run_iwpriv(dut, ifname, "set_eht_om_ctrl 1");
+	else if (dut->eht_omctrl == VALUE_DISABLED)
+		run_iwpriv(dut, ifname, "set_eht_om_ctrl 0");
+
+	if (dut->eht_txemlomn == VALUE_DISABLED)
+		run_system_wrapper(dut, "wifitool %s setUnitTestCmd 13 2 7 1",
+				   ifname);
 }
 
 
@@ -7978,6 +8525,30 @@ static void set_second_ap_security_conf(FILE *file, struct sigma_dut *dut)
 			hostapd_cipher_name(dut->ap_cipher));
 		fprintf(file, "wpa_passphrase=%s\n", dut->ap_tag_passphrase[0]);
 		break;
+	case AP2_WPA2_EAP:
+		fprintf(file, "ieee8021x=1\n");
+		fprintf(file, "wpa=2\n");
+		fprintf(file, "wpa_key_mgmt=WPA-EAP%s\n",
+			dut->ap_add_sha256 ? " WPA-EAP-SHA256" : "");
+		fprintf(file, "wpa_pairwise=CCMP\n");
+		if (dut->ap2_radius_port) {
+			fprintf(file, "auth_server_addr=%s\n",
+				dut->ap2_radius_ipaddr);
+			fprintf(file, "auth_server_port=%d\n",
+				dut->ap2_radius_port);
+			fprintf(file, "auth_server_shared_secret=%s\n",
+				dut->ap2_radius_password);
+		} else if (dut->ap_radius_port) {
+			fprintf(file, "auth_server_addr=%s\n",
+				dut->ap_radius_ipaddr);
+			fprintf(file, "auth_server_port=%d\n",
+				dut->ap_radius_port);
+			fprintf(file, "auth_server_shared_secret=%s\n",
+				dut->ap_radius_password);
+		} else
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"No RADIUS config for AP2");
+		break;
 	default:
 		fprintf(file, "wpa=1\n");
 		break;
@@ -7999,11 +8570,14 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	enum driver_type drv;
 	const char *key_mgmt;
 	int conf_counter = 0;
+	bool append_vht = false;
+	enum ap_mode mode;
 #ifdef ANDROID
 	struct group *gr;
 #endif /* ANDROID */
 
 	drv = get_driver_type(dut);
+	mode = dut->ap_mode;
 
 	if (dut->mode == SIGMA_MODE_STATION) {
 		stop_sta_mode(dut);
@@ -8027,6 +8601,13 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 
 	dut->mode = SIGMA_MODE_AP;
 
+	if (dut->ap_dpp_conf_addr &&
+	    strcasecmp(dut->ap_dpp_conf_addr, "mDNS") == 0 &&
+	    dpp_mdns_discover_relay_params(dut) < 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Failed to discover DPP Controller for AP Relay using mDNS");
+	}
+
 	if (drv == DRIVER_ATHEROS)
 		return cmd_ath_ap_config_commit(dut, conn, cmd);
 	if (drv == DRIVER_WCN)
@@ -8048,6 +8629,17 @@ write_conf:
 		if (run_system_wrapper(dut, "cp %s %s", f1, f2) != 0)
 			sigma_dut_print(dut, DUT_MSG_INFO,
 					"Failed to copy %s to %s", f1, f2);
+
+#ifdef ANDROID
+		if (chmod(f2, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Error changing permissions");
+
+		gr = getgrnam("wifi");
+		if (!gr || chown(f2, -1, gr->gr_gid) < 0)
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Error changing groupid");
+#endif /* ANDROID */
 	} else {
 		ap_conf_path_1[0] = '\0';
 	}
@@ -8064,7 +8656,10 @@ write_conf:
 
 	ifname = get_hostapd_ifname(dut);
 
-	switch (dut->ap_mode) {
+	if (conf_counter == 1 && dut->ap_mode_1 != AP_inval)
+		mode = dut->ap_mode_1;
+
+	switch (mode) {
 	case AP_11g:
 	case AP_11b:
 	case AP_11ng:
@@ -8116,14 +8711,14 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (dut->ap_mode == AP_11ng || dut->ap_mode == AP_11na ||
-	     (dut->ap_mode == AP_11ax && !dut->use_5g))) {
+	    (mode == AP_11ng || mode == AP_11na ||
+	     (mode == AP_11ax && !dut->use_5g))) {
 		int ht40plus = 0, ht40minus = 0, tx_stbc = 0;
 
 		fprintf(f, "ieee80211n=1\n");
-		if (dut->ap_mode == AP_11ax)
+		if (mode == AP_11ax)
 			fprintf(f, "ieee80211ax=1\n");
-		if (dut->ap_mode == AP_11ng &&
+		if (mode == AP_11ng &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
 		      dut->default_11ng_ap_chwidth == AP_40))) {
@@ -8135,7 +8730,7 @@ write_conf:
 		}
 
 		/* configure ht_capab based on channel width */
-		if (dut->ap_mode == AP_11na &&
+		if (mode == AP_11na &&
 		    (dut->ap_chwidth == AP_40 ||
 		     (dut->ap_chwidth == AP_AUTO &&
 		      dut->default_11na_ap_chwidth == AP_40))) {
@@ -8167,13 +8762,13 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (dut->ap_mode == AP_11ac ||
-	    (dut->ap_mode == AP_11ax && dut->use_5g))) {
+	    (mode == AP_11ac ||
+	    (mode == AP_11ax && dut->use_5g))) {
 		int ht40plus = 0, ht40minus = 0;
 
 		fprintf(f, "ieee80211ac=1\n"
 			"ieee80211n=1\n");
-		if (dut->ap_mode == AP_11ax)
+		if (mode == AP_11ax)
 			fprintf(f, "ieee80211ax=1\n");
 
 		/* configure ht_capab based on channel width */
@@ -8191,7 +8786,7 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (dut->ap_mode == AP_11ac || dut->ap_mode == AP_11na)) {
+	    (mode == AP_11ac || mode == AP_11na)) {
 		if (dut->ap_countrycode[0]) {
 			fprintf(f, "country_code=%s\n", dut->ap_countrycode);
 			fprintf(f, "ieee80211d=1\n");
@@ -8199,7 +8794,7 @@ write_conf:
 		}
 	}
 
-	if (drv == DRIVER_LINUX_WCN && dut->ap_mode == AP_11ax) {
+	if (drv == DRIVER_LINUX_WCN && mode == AP_11ax) {
 		if (dut->ap_txBF) {
 			fprintf(f, "he_su_beamformer=1\n");
 			fprintf(f, "he_su_beamformee=1\n");
@@ -8234,8 +8829,12 @@ write_conf:
 	if (dut->bridge)
 		fprintf(f, "bridge=%s\n", dut->bridge);
 
-	if (dut->ap_is_dual && conf_counter == 1)
-		fprintf(f, "channel=%d\n", dut->ap_tag_channel[0]);
+	if (dut->ap_is_dual && conf_counter == 1) {
+		if (dut->ap_channel_1)
+			fprintf(f, "channel=%d\n", dut->ap_channel_1);
+		else
+			fprintf(f, "channel=%d\n", dut->ap_tag_channel[0]);
+	}
 	else
 		fprintf(f, "channel=%d\n", dut->ap_channel);
 
@@ -8248,6 +8847,8 @@ write_conf:
 		fprintf(f, "ssid=%s\n", dut->ap_ssid);
 	else if (dut->ap_tag_ssid[0][0] && conf_counter == 1)
 		fprintf(f, "ssid=%s\n", dut->ap_tag_ssid[0]);
+	else if (dut->ap_ssid[0] && conf_counter == 1)
+		fprintf(f, "ssid=%s\n", dut->ap_ssid);
 	else
 		fprintf(f, "ssid=QCA AP OOB\n");
 
@@ -8275,6 +8876,8 @@ write_conf:
 			{ AKM_FILS_SHA384, "FILS-SHA384" },
 			{ AKM_FT_FILS_SHA256, "FT-FILS-SHA256" },
 			{ AKM_FT_FILS_SHA384, "FT-FILS-SHA384" },
+			{ AKM_SAE_EXT_KEY, "SAE-EXT-KEY" },
+			{ AKM_FT_SAE_EXT_KEY, "FT-SAE-EXT-KEY" },
 		};
 		int first = 1;
 		unsigned int i;
@@ -8445,7 +9048,8 @@ write_conf:
 				dut->ap_radius_port);
 		fprintf(f, "auth_server_shared_secret=%s\n",
 			dut->ap_radius_password);
-		if (dut->program == PROGRAM_HS2_R3) {
+		if (dut->program == PROGRAM_HS2_R3 ||
+		    dut->program == PROGRAM_HS2_R4) {
 			fprintf(f, "radius_das_port=3799\n");
 			fprintf(f, "radius_das_client=0.0.0.0 %s\n",
 				dut->ap_radius_password);
@@ -8809,9 +9413,14 @@ skip_key_mgmt:
 			fprintf(f, "fragment_size=128\n");
 	}
 
-	if (dut->ap_dpp_conf_addr && dut->ap_dpp_conf_pkhash)
-		fprintf(f, "dpp_controller=ipaddr=%s pkhash=%s\n",
-			dut->ap_dpp_conf_addr, dut->ap_dpp_conf_pkhash);
+	if (dut->ap_dpp_conf_addr && dut->ap_dpp_conf_pkhash) {
+		if (strcasecmp(dut->ap_dpp_conf_addr, "mDNS") != 0) {
+			fprintf(f, "dpp_controller=ipaddr=%s pkhash=%s\n",
+				dut->ap_dpp_conf_addr, dut->ap_dpp_conf_pkhash);
+			fprintf(f, "dpp_configurator_connectivity=1\n");
+		}
+		fprintf(f, "dpp_relay_port=8908\n");
+	}
 
 	if (dut->ap_he_rtsthrshld == VALUE_ENABLED)
 		fprintf(f, "he_rts_threshold=512\n");
@@ -8821,6 +9430,26 @@ skip_key_mgmt:
 	if ((dut->program == PROGRAM_VHT) ||
 	    (dut->program == PROGRAM_HE && dut->use_5g)) {
 		int vht_oper_centr_freq_idx;
+
+		/* Do not try to enable VHT or higher channel bandwidth for HE
+		 * on the 2.4 GHz band when configuring a dual band AP that
+		 * does have VHT enabled on the 5 GHz radio. */
+		if (dut->use_5g) {
+			if (dut->ap_is_dual) {
+				int chan;
+
+				if (conf_counter)
+					chan = dut->ap_tag_channel[0];
+				else
+					chan = dut->ap_channel;
+				append_vht = chan >= 36 && chan <= 171;
+			} else {
+				append_vht = true;
+			}
+		}
+
+		if (!append_vht)
+			goto skip_vht_parameters_set;
 
 		if (check_channel(dut, dut->ap_channel) < 0) {
 			send_resp(dut, conn, SIGMA_INVALID,
@@ -8864,7 +9493,7 @@ skip_key_mgmt:
 		fprintf(f, "vht_oper_centr_freq_seg0_idx=%d\n",
 			vht_oper_centr_freq_idx);
 		fprintf(f, "vht_oper_chwidth=%d\n", dut->ap_vht_chwidth);
-		if (dut->ap_mode == AP_11ax) {
+		if (mode == AP_11ax) {
 			fprintf(f, "he_oper_chwidth=%d\n", dut->ap_vht_chwidth);
 			fprintf(f, "he_oper_centr_freq_seg0_idx=%d\n",
 				vht_oper_centr_freq_idx);
@@ -8875,11 +9504,13 @@ skip_key_mgmt:
 
 		find_ap_ampdu_exp_and_max_mpdu_len(dut);
 
-		if (dut->ap_sgi80 || dut->ap_txBF ||
-		    dut->ap_ldpc != VALUE_NOT_SET ||
-		    dut->ap_tx_stbc == VALUE_ENABLED || dut->ap_mu_txBF ||
-		    dut->ap_ampdu_exp || dut->ap_max_mpdu_len ||
-		    dut->ap_chwidth == AP_160 || dut->ap_chwidth == AP_80_80) {
+		if (append_vht &&
+		    (dut->ap_sgi80 || dut->ap_txBF ||
+		     dut->ap_ldpc != VALUE_NOT_SET ||
+		     dut->ap_tx_stbc == VALUE_ENABLED || dut->ap_mu_txBF ||
+		     dut->ap_ampdu_exp || dut->ap_max_mpdu_len ||
+		     dut->ap_chwidth == AP_160 ||
+		     dut->ap_chwidth == AP_80_80)) {
 			fprintf(f, "vht_capab=%s%s%s%s%s%s",
 				dut->ap_sgi80 ? "[SHORT-GI-80]" : "",
 				dut->ap_txBF ?
@@ -8904,6 +9535,7 @@ skip_key_mgmt:
 			fprintf(f, "\n");
 		}
 	}
+skip_vht_parameters_set:
 
 	if (dut->ap_key_mgmt == AP_WPA2_OWE && dut->ap_tag_ssid[0][0] &&
 	    dut->ap_tag_key_mgmt[0] == AP2_OPEN) {
@@ -9721,6 +10353,9 @@ static int mac80211_get_wiphy(struct sigma_dut *dut)
 	int ret = 0;
 	int ifindex;
 
+	if (!dut->main_ifname)
+		return -1;
+
 	ifindex = if_nametoindex(dut->main_ifname);
 	if (ifindex == 0) {
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
@@ -9751,6 +10386,20 @@ static int mac80211_get_wiphy(struct sigma_dut *dut)
 				__func__, ret);
 
 	return ret;
+}
+
+
+void get_wiphy_capabilities(struct sigma_dut *dut)
+{
+	memset(&dut->hw_modes, 0, sizeof(struct dut_hw_modes));
+	if (get_driver_type(dut) == DRIVER_MAC80211 ||
+	    get_driver_type(dut) == DRIVER_LINUX_WCN) {
+		if (mac80211_get_wiphy(dut))
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"Failed to get wiphy data from the driver");
+		else
+			dut->hw_modes.valid = true;
+	}
 }
 
 #endif /* NL80211_SUPPORT */
@@ -9806,6 +10455,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_is_dual = 0;
 	dut->ap_mode = AP_inval;
 	dut->ap_mode_1 = AP_inval;
+	dut->ap_channel_1 = 0;
 
 	dut->ap_allow_vht_wep = 0;
 	dut->ap_allow_vht_tkip = 0;
@@ -9868,8 +10518,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 
 	dut->ap_ocvc = dut->user_config_ap_ocvc;
 
-	if (dut->program == PROGRAM_HS2 || dut->program == PROGRAM_HS2_R2 ||
-	    dut->program == PROGRAM_HS2_R3 ||
+	if (is_passpoint(dut->program) ||
 	    dut->program == PROGRAM_IOTLP) {
 		int i;
 
@@ -9926,7 +10575,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 		dut->ap_add_sha256 = 0;
 	}
 
-	if (dut->program == PROGRAM_HS2_R2 || dut->program == PROGRAM_HS2_R3 ||
+	if (is_passpoint_r2_or_newer(dut->program) ||
 	    dut->program == PROGRAM_IOTLP) {
 		int i;
 		const char hessid[] = "50:6f:9a:00:11:22";
@@ -10139,17 +10788,6 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 			dut->ap_dfs_mode = AP_DFS_MODE_ENABLED;
 	}
 
-	memset(&dut->hw_modes, 0, sizeof(struct dut_hw_modes));
-#ifdef NL80211_SUPPORT
-	if (get_driver_type(dut) == DRIVER_MAC80211 ||
-	    get_driver_type(dut) == DRIVER_LINUX_WCN) {
-		if (mac80211_get_wiphy(dut))
-			sigma_dut_print(dut, DUT_MSG_DEBUG,
-					"Failed to get wiphy data from the driver");
-		else
-			dut->hw_modes.valid = true;
-	}
-#endif /* NL80211_SUPPORT */
 
 	dut->ap_oper_chn = 0;
 
@@ -10187,7 +10825,27 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_dpp_conf_addr = NULL;
 	free(dut->ap_dpp_conf_pkhash);
 	dut->ap_dpp_conf_pkhash = NULL;
+	dut->dpp_local_bootstrap = -1;
 	dut->ap_start_disabled = 0;
+	dpp_mdns_stop(dut);
+	unlink("/tmp/dpp-rest-server.uri");
+	unlink("/tmp/dpp-rest-server.id");
+
+	dut->ap_cad_unsolicited_proberesp = 0;
+	dut->ap_unsolicited_proberesp = VALUE_NOT_SET;
+	dut->ap_activeind_proberesp = VALUE_NOT_SET;
+	dut->ap_6g_legacy_security = VALUE_NOT_SET;
+	dut->ap_fullbw_ulmumimo = VALUE_NOT_SET;
+	dut->ap_twtinfoframerx = VALUE_NOT_SET;
+	dut->ap_ulmudata_disablerx = VALUE_NOT_SET;
+	dut->ap_btwt = VALUE_NOT_SET;
+	dut->ltf_trig = 0;
+	dut->nontrigger_txbf = VALUE_NOT_SET;
+	dut->ap_preamblepunct = VALUE_NOT_SET;
+	dut->eht_txmcs = 0;
+	dut->ap_addba_amsdu = -1;
+	dut->eht_omctrl = VALUE_NOT_SET;
+	dut->eht_txemlomn = VALUE_NOT_SET;
 
 	if (is_60g_sigma_dut(dut)) {
 		dut->ap_mode = AP_11ad;
@@ -10453,10 +11111,10 @@ int open_monitor(const char *ifname);
 #endif /* __linux__ */
 
 enum send_frame_type {
-		DISASSOC, DEAUTH, SAQUERY
+		DISASSOC, DEAUTH, SAQUERY, CHANNEL_SWITCH
 };
 enum send_frame_protection {
-	CORRECT_KEY, INCORRECT_KEY, UNPROTECTED
+	PROTECTION_NOT_SET, CORRECT_KEY, INCORRECT_KEY, UNPROTECTED
 };
 
 
@@ -10527,6 +11185,8 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 	case SAQUERY:
 		*pos++ = 0xd0;
 		break;
+	default:
+		return -1;
 	}
 
 	if (protected == INCORRECT_KEY)
@@ -10603,6 +11263,8 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 			*pos++ = 0x12;
 			*pos++ = 0x34;
 			break;
+		default:
+			return -1;
 		}
 	}
 
@@ -10998,6 +11660,123 @@ static int ath_ap_send_frame_bcn_rpt_req(struct sigma_dut *dut,
 }
 
 
+static void binarytodecimal(int binarynum, char *buf, size_t buf_size)
+{
+	int decimalnum = 0, temp = 0, remainder;
+	char temp_val[100];
+
+	while (binarynum) {
+		remainder = binarynum % 10;
+		binarynum = binarynum / 10;
+		decimalnum += remainder * (1 << temp);
+		temp++;
+	}
+	snprintf(temp_val, sizeof(temp_val), "%d", decimalnum);
+	strlcat(buf, temp_val, buf_size);
+}
+
+
+/* Below commands are to add B-TWT dialog(session)
+ * wifitool <ifname> ap_twt_add_dialog 00:00:00:00:00:00 <id> <intvl> <mant> <dur> <off-0> <cmd-4> <recomd(3b)|pers(8b)|rsvd11-ID0-P-U-T-B>
+ */
+static int ap_send_btwt(struct sigma_dut *dut, struct sigma_cmd *cmd,
+			const char *ifname)
+{
+	char buf[200];
+	const char *str_val;
+	int val_id = 0, twt_en = 0, flowtype = 0, wakeintexp = 0;
+	char bin[200];
+
+	snprintf(buf, sizeof(buf),
+		 "wifitool %s ap_twt_add_dialog 00:00:00:00:00:00", ifname);
+
+	str_val = get_param(cmd, "BTWT_ID");
+	if (str_val) {
+		char btwt_id[100];
+		int btwtid;
+
+		btwtid = atoi(str_val);
+		if (btwtid == 0)
+		    val_id = 1;
+		else
+		    val_id = 0;
+		snprintf(btwt_id, sizeof(btwt_id), " %d", btwtid);
+		strlcat(buf, btwt_id, sizeof(buf));
+	}
+
+	str_val = get_param(cmd, "WakeIntervalExp");
+	if (str_val) {
+	    wakeintexp = atoi(str_val);
+	    if (wakeintexp < 0)
+		    return -1;
+	}
+
+	str_val = get_param(cmd, "WakeIntervalMantissa");
+	if (str_val) {
+		char wakeintdur[100];
+		int wakeintman = 0, wakeint = 0;
+
+		wakeintman = atoi(str_val);
+		wakeint = 1 << wakeintexp;
+		snprintf(wakeintdur, sizeof(wakeintdur), " %d",
+			 wakeint * wakeintman);
+		strlcat(buf, wakeintdur, sizeof(buf));
+	}
+
+	if (parse_send_frame_params_int("WakeIntervalMantissa", cmd, dut,
+					buf, sizeof(buf)))
+	    return -1;
+
+	str_val = get_param(cmd, "NominalMinWakeDur");
+	if (str_val) {
+		char mindur[100];
+		int minwakedur = 0;
+
+		minwakedur = atoi(str_val) * 256;
+		snprintf(mindur, sizeof(mindur), " %d", minwakedur);
+		strlcat(buf, mindur, sizeof(buf));
+	}
+
+	strlcat(buf, " 0", sizeof(buf));
+	strlcat(buf, " 4", sizeof(buf));
+
+	str_val = get_param(cmd, "BTWT_Persistence");
+	if (str_val) {
+		char btwt_p[100];
+		int btwt_p_val;
+
+		btwt_p_val = atoi(str_val);
+		snprintf(btwt_p, sizeof(btwt_p), " 0x00%x00", btwt_p_val);
+		strlcat(buf, btwt_p, sizeof(buf));
+		snprintf(btwt_p, sizeof(btwt_p), "%x", val_id);
+		strlcat(buf, btwt_p, sizeof(buf));
+	}
+
+	str_val = get_param(cmd, "TWT_Trigger");
+	if (str_val) {
+		if (strcasecmp(str_val, "Enable") == 0) {
+			twt_en = 1;
+		} else if (strcasecmp(str_val, "Disable") == 0) {
+			twt_en = 0;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Unsupported TWT_Trigger");
+			return -1;
+		}
+	}
+
+	str_val = get_param(cmd, "FlowType");
+	if (str_val)
+	    flowtype = atoi(str_val);
+
+	snprintf(bin, sizeof(bin), "0%d%d1", flowtype, twt_en);
+	binarytodecimal(atoi(bin), buf, sizeof(buf));
+
+	run_system_wrapper(dut, buf);
+	return 0;
+}
+
+
 static void inform_and_sleep(struct sigma_dut *dut, int seconds)
 {
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "sleeping for %d seconds", seconds);
@@ -11216,8 +11995,10 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 	/* const char *ifname = get_param(cmd, "INTERFACE"); */
 	const char *val;
 	enum send_frame_type frame;
-	enum send_frame_protection protected;
+	enum send_frame_protection protected = PROTECTION_NOT_SET;
 	char buf[100];
+	unsigned int freq;
+	unsigned int chan;
 
 	val = get_param(cmd, "Program");
 	if (val) {
@@ -11248,6 +12029,8 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 		frame = DEAUTH;
 	else if (strcasecmp(val, "saquery") == 0)
 		frame = SAQUERY;
+	else if (strcasecmp(val, "ChannelSwitchAnncment") == 0)
+		frame = CHANNEL_SWITCH;
 	else {
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Unsupported "
 			  "PMFFrameType");
@@ -11257,28 +12040,31 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 	val = get_param(cmd, "PMFProtected");
 	if (val == NULL)
 		val = get_param(cmd, "Protected");
-	if (val == NULL)
-		return -1;
-	if (strcasecmp(val, "Correct-key") == 0 ||
-	    strcasecmp(val, "CorrectKey") == 0)
-		protected = CORRECT_KEY;
-	else if (strcasecmp(val, "IncorrectKey") == 0)
-		protected = INCORRECT_KEY;
-	else if (strcasecmp(val, "Unprotected") == 0)
-		protected = UNPROTECTED;
-	else {
-		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Unsupported "
-			  "PMFProtected");
-		return 0;
+	if (val) {
+		if (strcasecmp(val, "Correct-key") == 0 ||
+		    strcasecmp(val, "CorrectKey") == 0)
+			protected = CORRECT_KEY;
+		else if (strcasecmp(val, "IncorrectKey") == 0)
+			protected = INCORRECT_KEY;
+		else if (strcasecmp(val, "Unprotected") == 0)
+			protected = UNPROTECTED;
+		else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported PMFProtected");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	val = get_param(cmd, "stationID");
-	if (val == NULL)
-		return -1;
 
-	if (protected == INCORRECT_KEY ||
-	    (protected == UNPROTECTED && frame == SAQUERY))
+	if (val && (protected == INCORRECT_KEY ||
+		    (protected == UNPROTECTED && frame == SAQUERY)))
 		return ap_inject_frame(dut, conn, frame, protected, val);
+
+	if (!val && frame != CHANNEL_SWITCH) {
+		sigma_dut_print(dut, DUT_MSG_ERROR, "stationID not specified");
+		return INVALID_SEND_STATUS;
+	}
 
 	switch (frame) {
 	case DISASSOC:
@@ -11291,6 +12077,19 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 		break;
 	case SAQUERY:
 		snprintf(buf, sizeof(buf), "sa_query %s", val);
+		break;
+	case CHANNEL_SWITCH:
+		val = get_param(cmd, "channel");
+		if (!val)
+			return -1;
+		chan = atoi(val);
+		freq = channel_to_freq(dut, chan);
+		if (!freq) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid channel: %d", chan);
+			return INVALID_SEND_STATUS;
+		}
+		snprintf(buf, sizeof(buf), "chan_switch 5 %d", freq);
 		break;
 	}
 
@@ -12551,6 +13350,82 @@ static enum sigma_cmd_result he_ar_gi_ltf_mask(struct sigma_dut *dut,
 }
 
 
+static enum sigma_cmd_result eht_ar_gi_ltf_mask(struct sigma_dut *dut,
+						struct sigma_conn *conn,
+						const char *ifname,
+						const char *val)
+{
+
+	unsigned int he_ar_gi = 0, he_ar_ltf = 0;
+	char buf[100];
+	int gi = -1, ltf = -1;
+
+	if (strcmp(val, "0.4") == 0) {
+		he_ar_gi = 0x01;
+		if (dut->nontrigger_txbf == VALUE_ENABLED)
+			gi = 1;
+	} else if (strcmp(val, "0.8") == 0) {
+		he_ar_gi = 0x02;
+		if (dut->nontrigger_txbf == VALUE_ENABLED)
+			gi = 0;
+	} else if (strcmp(val, "1.6") == 0) {
+		he_ar_gi = 0x04;
+		if (dut->nontrigger_txbf == VALUE_ENABLED)
+			gi = 2;
+	} else if (strcmp(val, "3.2") == 0) {
+		he_ar_gi = 0x08;
+		if (dut->nontrigger_txbf == VALUE_ENABLED)
+			gi = 3;
+	} else {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Unsupported shortGI");
+		return STATUS_SENT_ERROR;
+	}
+
+	if (!dut->ar_ltf) {
+		if (dut->ltf_trig == 1) {
+			he_ar_ltf = 0x01;
+		} else if (dut->ltf_trig == 2) {
+			he_ar_ltf = 0x02;
+		} else if (dut->ltf_trig == 4) {
+			he_ar_ltf = 0x04;
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported LTF");
+			return STATUS_SENT_ERROR;
+		}
+	} else {
+		if (dut->ar_ltf && strcmp(dut->ar_ltf, "6.4") == 0) {
+			he_ar_ltf = 0x02;
+			if (dut->nontrigger_txbf == VALUE_ENABLED)
+				ltf = 1;
+		} else if (dut->ar_ltf && strcmp(dut->ar_ltf, "12.8") == 0) {
+			he_ar_ltf = 0x04;
+			if (dut->nontrigger_txbf == VALUE_ENABLED)
+				ltf = 2;
+		} else if (dut->ar_ltf && strcmp(dut->ar_ltf, "3.2") == 0) {
+			he_ar_ltf = 0x01;
+			if (dut->nontrigger_txbf == VALUE_ENABLED)
+				ltf = 0;
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported LTF");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	snprintf(buf, sizeof(buf), "%02x%02x", he_ar_gi, he_ar_ltf);
+	run_iwpriv(dut, ifname, "ar_gi_ltf 0x%s", buf);
+	if (dut->nontrigger_txbf == VALUE_ENABLED) {
+		run_system_wrapper(
+			dut, "wifitool %s setUnitTestCmd 0x48 3 620 %d %d",
+			ifname, ltf, gi);
+	}
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
 static enum sigma_cmd_result he_rualloctones(struct sigma_dut *dut,
 					     struct sigma_conn *conn,
 					     const char *ifname,
@@ -12871,10 +13746,15 @@ static enum sigma_cmd_result ath_ap_set_rfeature(struct sigma_dut *dut,
 
 	val = get_param(cmd, "GI");
 	if (val) {
-		if (dut->ap_fixed_rate)
+		if (dut->ap_fixed_rate) {
 			res = he_shortgi(dut, conn, ifname, val);
-		else
-			res = he_ar_gi_ltf_mask(dut, conn, ifname, val);
+		} else {
+			if (dut->ap_mode == AP_11be)
+				res = eht_ar_gi_ltf_mask(dut, conn, ifname,
+							 val);
+			else
+				res = he_ar_gi_ltf_mask(dut, conn, ifname, val);
+		}
 		if (res != SUCCESS_SEND_STATUS)
 			return res;
 	}
@@ -13055,14 +13935,38 @@ static enum sigma_cmd_result ath_ap_set_rfeature(struct sigma_dut *dut,
 
 		trig_gi_ltf = atoi(val);
 		if (trig_gi_ltf == 0) {
-			he_ltf(dut, conn, ifname, "3.2");
-			he_shortgi(dut, conn, ifname, "1.6");
+			if (dut->ap_fixed_rate) {
+				he_ltf(dut, conn, ifname, "3.2");
+				he_shortgi(dut, conn, ifname, "1.6");
+			} else {
+				dut->ltf_trig = 1;
+				res = eht_ar_gi_ltf_mask(dut, conn, ifname,
+							 "1.6");
+				if (res != SUCCESS_SEND_STATUS)
+					return res;
+			}
 		} else if (trig_gi_ltf == 1) {
-			he_ltf(dut, conn, ifname, "6.4");
-			he_shortgi(dut, conn, ifname, "1.6");
+			if (dut->ap_fixed_rate) {
+				he_ltf(dut, conn, ifname, "6.4");
+				he_shortgi(dut, conn, ifname, "1.6");
+			} else {
+				dut->ltf_trig = 2;
+				res = eht_ar_gi_ltf_mask(dut, conn, ifname,
+							 "1.6");
+				if (res != SUCCESS_SEND_STATUS)
+					return res;
+			}
 		} else if (trig_gi_ltf == 2) {
-			he_ltf(dut, conn, ifname, "12.8");
-			he_shortgi(dut, conn, ifname, "3.2");
+			if (dut->ap_fixed_rate) {
+				he_ltf(dut, conn, ifname, "12.8");
+				he_shortgi(dut, conn, ifname, "3.2");
+			} else {
+				dut->ltf_trig = 4;
+				res = eht_ar_gi_ltf_mask(dut, conn, ifname,
+							 "3.2");
+				if (res != SUCCESS_SEND_STATUS)
+					return res;
+			}
 		} else {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,Unsupported Trig_ComInfo_GI-LTF");
@@ -13510,6 +14414,40 @@ static enum sigma_cmd_result ath_ap_set_rfeature(struct sigma_dut *dut,
 		run_iwpriv(dut, ifname, "muedca_timer %d %d", AP_AC_VO, param);
 	}
 
+	if (dut->ap_btwt == VALUE_ENABLED)
+		ap_send_btwt(dut, cmd, ifname);
+
+	val = get_param(cmd, "EMLInitialControlFrame");
+	if (val) {
+		if (strcasecmp(val, "MURTS") == 0) {
+			if (dut->eht_txemlomn == VALUE_DISABLED &&
+			    dut->device_type == AP_testbed) {
+				run_system_wrapper(dut,
+						   "wifitool %s setUnitTestCmd 0x47 2 545 1",
+						   ifname);
+			} else {
+				run_system_wrapper(dut,
+						   "wifitool %s setUnitTestCmd 0x47 2 545 1",
+						   ifname);
+			}
+		} else if (strcasecmp(val, "BSRP") == 0) {
+			if (dut->eht_txemlomn == VALUE_DISABLED &&
+			    dut->device_type == AP_testbed) {
+				run_system_wrapper(dut,
+						   "wifitool %s setUnitTestCmd 0x47 2 545 0",
+						   ifname);
+			} else {
+				run_system_wrapper(dut,
+						   "wifitool %s setUnitTestCmd 0x47 2 545 0",
+						   ifname);
+			}
+		} else {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Unsupported EMLInitialControlFrame");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
 	return SUCCESS_SEND_STATUS;
 }
 
@@ -13580,22 +14518,34 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	val = get_param(cmd, "GI");
 	if (val) {
 		int fix_rate_sgi;
+		u8 he_gi_val;
+		u8 auto_rate_gi;
 
 		if (strcmp(val, "0.8") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 9");
 			fix_rate_sgi = 1;
+			auto_rate_gi = 9;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_0_8;
 		} else if (strcmp(val, "1.6") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 10");
 			fix_rate_sgi = 2;
+			auto_rate_gi = 10;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_1_6;
 		} else if (strcmp(val, "3.2") == 0) {
-			run_iwpriv(dut, ifname, "enable_short_gi 11");
 			fix_rate_sgi = 3;
+			auto_rate_gi = 11;
+			he_gi_val = NL80211_RATE_INFO_HE_GI_3_2;
 		} else {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,GI value not supported");
 			return STATUS_SENT_ERROR;
 		}
-		run_iwpriv(dut, ifname, "enable_short_gi %d", fix_rate_sgi);
+		if (wcn_set_he_gi(dut, ifname, he_gi_val)) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"wcn_set_he_gi failed, using iwpriv");
+			run_iwpriv(dut, ifname, "enable_short_gi %d",
+				   auto_rate_gi);
+			run_iwpriv(dut, ifname, "enable_short_gi %d",
+				   fix_rate_sgi);
+		}
 	}
 
 	val = get_param(cmd, "LTF");
@@ -14078,6 +15028,10 @@ cmd_ap_preset_testparameters(struct sigma_dut *dut, struct sigma_conn *conn,
 		free(dut->ap_dpp_conf_pkhash);
 		dut->ap_dpp_conf_pkhash = strdup(val);
 	}
+
+	if (dut->ap_dpp_conf_addr &&
+	    strcasecmp(dut->ap_dpp_conf_addr, "mDNS") == 0)
+		dpp_mdns_discover_relay_params(dut);
 
 	return 1;
 }
