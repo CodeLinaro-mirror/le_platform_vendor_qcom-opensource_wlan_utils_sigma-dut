@@ -85,8 +85,17 @@
 #define BIT_ULL(nr)		(1ULL << (nr))
 #endif
 
+#ifndef BIT
+#define BIT(x) (1U << (x))
+#endif
+
 #ifndef ETH_P_ARP
 #define ETH_P_ARP 0x0806
+#endif
+
+#ifndef MAC2STR
+#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
+#define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
 #endif
 
 #define IPV6_ADDR_LEN 16
@@ -95,6 +104,9 @@ struct sigma_dut;
 
 #define MAX_PARAMS 100
 #define MAX_RADIO 3
+#ifndef MAX_NUM_MLO_LINKS
+#define MAX_NUM_MLO_LINKS 15
+#endif
 
 #define NAN_AWARE_IFACE "wifi-aware0"
 #define BROADCAST_ADDR "255.255.255.255"
@@ -212,7 +224,8 @@ struct sigma_stream {
 		SIGMA_PROFILE_IPTV,
 		SIGMA_PROFILE_TRANSACTION,
 		SIGMA_PROFILE_START_SYNC,
-		SIGMA_PROFILE_UAPSD
+		SIGMA_PROFILE_UAPSD,
+		SIGMA_PROFILE_BURST,
 	} profile;
 	int sender;
 	struct in_addr dst;
@@ -240,6 +253,11 @@ struct sigma_stream {
 	int stop;
 	int ta_send_in_progress;
 	int trans_proto;
+
+	int no_of_pkts_burst;
+	int burst_periodicity;
+	int dscp;
+	bool use_dscp;
 
 	/* Statistics */
 	int tx_act_frames; /*
@@ -619,6 +637,7 @@ struct sigma_dut {
 		AP_11ac,
 		AP_11ad,
 		AP_11ax,
+		AP_11be,
 		AP_inval
 	} ap_mode;
 	int ap_channel;
@@ -654,6 +673,7 @@ struct sigma_dut {
 		AP_40,
 		AP_80,
 		AP_160,
+		AP_320,
 		AP_80_80,
 		AP_AUTO
 	} ap_chwidth;
@@ -688,6 +708,7 @@ struct sigma_dut {
 		AP2_OSEN,
 		AP2_WPA2_PSK,
 		AP2_WPA2_OWE,
+		AP2_WPA2_EAP,
 	} ap_tag_key_mgmt[MAX_WLAN_TAGS - 1];
 	int ap_add_sha256;
 	int ap_add_sha384;
@@ -879,6 +900,10 @@ struct sigma_dut {
 	int he_srctrl_allow;
 
 	int ap_ocvc;
+	int ap_cad_unsolicited_proberesp;
+	int ltf_trig;
+	int eht_txmcs;
+	int ap_addba_amsdu;
 
 	enum value_not_set_enabled_disabled ap_oce;
 	enum value_not_set_enabled_disabled ap_filsdscv;
@@ -897,6 +922,17 @@ struct sigma_dut {
 	enum value_not_set_enabled_disabled ap_twtresp;
 	enum value_not_set_enabled_disabled he_sounding;
 	enum value_not_set_enabled_disabled he_set_sta_1x1;
+	enum value_not_set_enabled_disabled ap_unsolicited_proberesp;
+	enum value_not_set_enabled_disabled ap_activeind_proberesp;
+	enum value_not_set_enabled_disabled ap_6g_legacy_security;
+	enum value_not_set_enabled_disabled ap_fullbw_ulmumimo;
+	enum value_not_set_enabled_disabled ap_twtinfoframerx;
+	enum value_not_set_enabled_disabled ap_ulmudata_disablerx;
+	enum value_not_set_enabled_disabled ap_btwt;
+	enum value_not_set_enabled_disabled nontrigger_txbf;
+	enum value_not_set_enabled_disabled ap_preamblepunct;
+	enum value_not_set_enabled_disabled eht_omctrl;
+	enum value_not_set_enabled_disabled eht_txemlomn;
 
 	enum ppdu {
 		PPDU_NOT_SET,
@@ -1178,6 +1214,8 @@ struct sigma_dut {
 	struct mdnssd_apis mdnssd;
 	struct mdnss_discovery_info mdns_discover;
 #endif /* ANDROID_MDNS */
+	char host_name[100];
+	int sta_roaming_disabled;
 };
 
 
@@ -1293,6 +1331,7 @@ int ap_wps_registration(struct sigma_dut *dut, struct sigma_conn *conn,
 			struct sigma_cmd *cmd);
 const char * get_hostapd_ifname(struct sigma_dut *dut);
 void get_wiphy_capabilities(struct sigma_dut *dut);
+void kill_hostapd_process_pid(struct sigma_dut *dut);
 
 /* sta.c */
 void sta_register_cmds(void);
@@ -1376,6 +1415,7 @@ int get_wps_forced_version(struct sigma_dut *dut, const char *str);
 int base64_encode(const char *src, size_t len, char *out, size_t out_len);
 unsigned char * base64_decode(const char *src, size_t len, size_t *out_len);
 int random_get_bytes(char *buf, size_t len);
+int random_mac_addr(u8 *addr);
 int get_enable_disable(const char *val);
 int wcn_driver_cmd(const char *ifname, char *buf);
 
@@ -1459,6 +1499,10 @@ int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
 void kill_pid(struct sigma_dut *dut, const char *pid_file);
 int get_ip_addr(const char *ifname, int ipv6, char *buf, size_t len);
 bool is_6ghz_freq(int freq);
+
+enum sigma_cmd_result dev_start_test_log(struct sigma_dut *dut,
+					 struct sigma_conn *conn,
+					 struct sigma_cmd *cmd);
 
 /* dnssd.c */
 int mdnssd_init(struct sigma_dut *dut);
