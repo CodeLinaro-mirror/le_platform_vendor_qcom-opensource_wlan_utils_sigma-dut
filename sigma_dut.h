@@ -526,6 +526,27 @@ struct mdnss_discovery_info {
 };
 #endif /* ANDROID_MDNS */
 
+enum sigma_akm_suites {
+	SIGMA_AKM_WPA_PSK = 0,
+	SIGMA_AKM_FT_PSK,
+	SIGMA_AKM_PSK_SHA256,
+	SIGMA_AKM_SAE,
+	SIGMA_AKM_FT_SAE,
+	SIGMA_AKM_SAE_EXT_KEY,
+	SIGMA_AKM_FT_SAE_EXT_KEY,
+};
+
+enum sigma_cipher_suites {
+	SIGMA_CIPHER_CCMP = 0,
+	SIGMA_CIPHER_GCMP,
+	SIGMA_CIPHER_CCMP_256,
+	SIGMA_CIPHER_GCMP_256,
+	SIGMA_CIPHER_AES_128_CMAC,
+	SIGMA_CIPHER_BIP_GMAC_128,
+	SIGMA_CIPHER_BIP_GMAC_256,
+	SIGMA_CIPHER_BIP_CMAC_256,
+};
+
 struct sigma_dut {
 	const char *main_ifname;
 	char *main_ifname_2g;
@@ -536,6 +557,8 @@ struct sigma_dut {
 	char *p2p_ifname_buf;
 	int use_5g;
 	int ap_band_6g;
+	int ap_center_freq;
+	int ap_punct_bitmap;
 	int sta_2g_started;
 	int sta_5g_started;
 
@@ -702,6 +725,7 @@ struct sigma_dut {
 		AP_WPA2_PSK_SHA256,
 		AP_WPA2_ENT_FT_EAP,
 		AP_OSEN,
+		AP_WPA3_SAE_EXT,
 	} ap_key_mgmt;
 	enum ap_tag_key_mgmt {
 		AP2_OPEN,
@@ -811,7 +835,8 @@ struct sigma_dut {
 	enum ap_vht_chwidth {
 		AP_20_40_VHT_OPER_CHWIDTH,
 		AP_80_VHT_OPER_CHWIDTH,
-		AP_160_VHT_OPER_CHWIDTH
+		AP_160_VHT_OPER_CHWIDTH,
+		AP_320_VHT_OPER_CHWIDTH
 	} ap_vht_chwidth;
 	int ap_txBF;
 	int ap_mu_txBF;
@@ -904,6 +929,7 @@ struct sigma_dut {
 	int ltf_trig;
 	int eht_txmcs;
 	int ap_addba_amsdu;
+	unsigned int ap_ehtmcs_map;
 
 	enum value_not_set_enabled_disabled ap_oce;
 	enum value_not_set_enabled_disabled ap_filsdscv;
@@ -947,6 +973,7 @@ struct sigma_dut {
 		BA_BUFSIZE_NOT_SET,
 		BA_BUFSIZE_64,
 		BA_BUFSIZE_256,
+		BA_BUFSIZE_1024,
 	} ap_ba_bufsize;
 
 	enum mimo {
@@ -1155,6 +1182,7 @@ struct sigma_dut {
 #ifdef NL80211_SUPPORT
 	struct nl80211_ctx *nl_ctx;
 	int config_rsnie;
+	int config_random_pmkid;
 #endif /* NL80211_SUPPORT */
 
 	int sta_nss;
@@ -1216,6 +1244,12 @@ struct sigma_dut {
 #endif /* ANDROID_MDNS */
 	char host_name[100];
 	int sta_roaming_disabled;
+	int key_mgmt_capa; /* bitmap of enum sigma_akm_suites values */
+	int pairwise_ciphers_capa; /* bitmap of enum sigma_cipher_suites values
+				    */
+	int group_ciphers_capa; /* bitmap of enum sigma_cipher_suites values */
+	int group_mgmt_ciphers_capa; /* bitmap of enum sigma_cipher_suites
+				      * values */
 };
 
 
@@ -1360,6 +1394,8 @@ int sta_set_addba_buf_size(struct sigma_dut *dut,
 			   const char *intf, int bufsize);
 int wcn_set_he_gi(struct sigma_dut *dut, const char *intf, u8 gi_val);
 #ifdef NL80211_SUPPORT
+int wcn_set_link_gi(struct sigma_dut *dut, const char *intf, int link_id,
+		    u8 gi_val);
 int wcn_set_he_ltf(struct sigma_dut *dut, const char *intf,
 		   enum qca_wlan_he_ltf_cfg ltf);
 #endif /* NL80211_SUPPORT */
@@ -1407,6 +1443,8 @@ size_t strlcpy(char *dest, const char *src, size_t siz);
 size_t strlcat(char *dst, const char *str, size_t size);
 #endif /* ANDROID */
 void hex_dump(struct sigma_dut *dut, u8 *data, size_t len);
+int snprintf_hex(char *buf, size_t buf_size, const uint8_t *data,
+		size_t len, bool uppercase);
 int get_wps_pin_from_mac(struct sigma_dut *dut, const char *macaddr,
 			 char *pin, size_t len);
 void str_remove_chars(char *str, char ch);
@@ -1498,6 +1536,8 @@ int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
 		  const char *ifname);
 void kill_pid(struct sigma_dut *dut, const char *pid_file);
 int get_ip_addr(const char *ifname, int ipv6, char *buf, size_t len);
+int chan_to_freq(int chan, bool is_6g);
+int freq_to_chan(int freq);
 bool is_6ghz_freq(int freq);
 
 enum sigma_cmd_result dev_start_test_log(struct sigma_dut *dut,

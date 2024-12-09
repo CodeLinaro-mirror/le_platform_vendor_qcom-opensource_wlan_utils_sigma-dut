@@ -454,6 +454,31 @@ void hex_dump(struct sigma_dut *dut, u8 *data, size_t len)
 }
 
 
+int snprintf_hex(char *buf, size_t buf_size, const uint8_t *data,
+		size_t len, bool uppercase)
+{
+	size_t i;
+	char *pos = buf, *end = buf + buf_size;
+	int ret;
+
+	if (buf_size == 0)
+		return 0;
+
+	for (i = 0; i < len; i++) {
+		ret = snprintf(pos, end - pos, uppercase ? "%02X" : "%02x",
+			       data[i]);
+		if (snprintf_error(end - pos, ret)) {
+			end[-1] = '\0';
+			return pos - buf;
+		}
+		pos += ret;
+	}
+
+	end[-1] = '\0';
+	return pos - buf;
+}
+
+
 #ifdef NL80211_SUPPORT
 
 void * nl80211_cmd(struct sigma_dut *dut, struct nl80211_ctx *ctx,
@@ -1213,6 +1238,42 @@ void kill_pid(struct sigma_dut *dut, const char *pid_file)
 
 	unlink(pid_file);
 	sleep(1);
+}
+
+
+int chan_to_freq(int chan, bool is_6g)
+{
+	if (is_6g) {
+		if (chan == 2)
+			return 5935;
+
+		return 5950 + chan * 5;
+	}
+
+	if (chan == 14)
+		return 2484;
+	if (chan >= 1 && chan <= 13)
+		return 2407 + 5 * chan;
+
+	return 5000 + 5 * chan;
+}
+
+
+int freq_to_chan(int freq)
+{
+	if (freq == 2484)
+		return 14;
+
+	if (freq < 3000)
+		return (freq - 2407) / 5;
+
+	if (freq == 5935)
+		return 2;
+
+	if (freq > 5950)
+		return (freq - 5950) / 5;
+
+	return (freq - 5000) / 5;
 }
 
 
