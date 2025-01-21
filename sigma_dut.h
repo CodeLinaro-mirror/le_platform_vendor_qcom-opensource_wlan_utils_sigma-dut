@@ -526,6 +526,35 @@ struct mdnss_discovery_info {
 };
 #endif /* ANDROID_MDNS */
 
+enum sigma_akm_suites {
+	SIGMA_AKM_WPA_PSK = 0,
+	SIGMA_AKM_FT_PSK,
+	SIGMA_AKM_PSK_SHA256,
+	SIGMA_AKM_SAE,
+	SIGMA_AKM_FT_SAE,
+	SIGMA_AKM_SAE_EXT_KEY,
+	SIGMA_AKM_FT_SAE_EXT_KEY,
+	SIGMA_AKM_FT_802_1X,
+	SIGMA_AKM_FT_802_1X_SHA384,
+	SIGMA_AKM_SUITE_B,
+	SIGMA_AKM_SUITE_B_192,
+	SIGMA_AKM_FILS_SHA256,
+	SIGMA_AKM_FILS_SHA384,
+	SIGMA_AKM_FT_FILS_SHA256,
+	SIGMA_AKM_FT_FILS_SHA384,
+};
+
+enum sigma_cipher_suites {
+	SIGMA_CIPHER_CCMP = 0,
+	SIGMA_CIPHER_GCMP,
+	SIGMA_CIPHER_CCMP_256,
+	SIGMA_CIPHER_GCMP_256,
+	SIGMA_CIPHER_AES_128_CMAC,
+	SIGMA_CIPHER_BIP_GMAC_128,
+	SIGMA_CIPHER_BIP_GMAC_256,
+	SIGMA_CIPHER_BIP_CMAC_256,
+};
+
 struct sigma_dut {
 	const char *main_ifname;
 	char *main_ifname_2g;
@@ -1050,6 +1079,7 @@ struct sigma_dut {
 		PROGRAM_HS2_2022,
 		PROGRAM_LOCR2,
 		PROGRAM_EHT,
+		PROGRAM_PR,
 	} program;
 
 	enum device_type {
@@ -1161,6 +1191,7 @@ struct sigma_dut {
 #ifdef NL80211_SUPPORT
 	struct nl80211_ctx *nl_ctx;
 	int config_rsnie;
+	int config_random_pmkid;
 #endif /* NL80211_SUPPORT */
 
 	int sta_nss;
@@ -1187,6 +1218,11 @@ struct sigma_dut {
 		SAE_PWE_LOOP,
 		SAE_PWE_H2E
 	} sae_pwe;
+	enum {
+		SEC_OPEN,
+		SEC_MAC,
+		SEC_PHY
+	} sectype;
 	int owe_ptk_workaround;
 	struct dut_hw_modes hw_modes;
 	int ocvc;
@@ -1222,6 +1258,12 @@ struct sigma_dut {
 #endif /* ANDROID_MDNS */
 	char host_name[100];
 	int sta_roaming_disabled;
+	int key_mgmt_capa; /* bitmap of enum sigma_akm_suites values */
+	int pairwise_ciphers_capa; /* bitmap of enum sigma_cipher_suites values
+				    */
+	int group_ciphers_capa; /* bitmap of enum sigma_cipher_suites values */
+	int group_mgmt_ciphers_capa; /* bitmap of enum sigma_cipher_suites
+				      * values */
 };
 
 
@@ -1415,6 +1457,8 @@ size_t strlcpy(char *dest, const char *src, size_t siz);
 size_t strlcat(char *dst, const char *str, size_t size);
 #endif /* ANDROID */
 void hex_dump(struct sigma_dut *dut, u8 *data, size_t len);
+int snprintf_hex(char *buf, size_t buf_size, const uint8_t *data,
+		size_t len, bool uppercase);
 int get_wps_pin_from_mac(struct sigma_dut *dut, const char *macaddr,
 			 char *pin, size_t len);
 void str_remove_chars(char *str, char ch);
@@ -1460,6 +1504,8 @@ int loc_cmd_sta_preset_testparameters(struct sigma_dut *dut,
 int lowi_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 int loc_r2_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd);
+int loc_pr_cmd_dev_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 
 /* dpp.c */
