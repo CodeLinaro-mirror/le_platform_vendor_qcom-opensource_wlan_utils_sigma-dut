@@ -1096,7 +1096,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 			dut->ap_band = AP_BAND_6GHz;
 		}
 
-		if (dut->ap_interface_5g && dut->ap_interface_2g)
+		if (dut->ap_mode != AP_11be && dut->ap_interface_5g && dut->ap_interface_2g)
 			dut->ap_is_dual = 1;
 
 		if (dut->ap_mode == AP_11be) {
@@ -1113,6 +1113,10 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 				dut->ap_interface_2g = 1;
 				mlo_config_band = AP_BAND_24GHz;
 			}
+			if ((dut->ap_interface_5g && dut->ap_interface_2g) ||
+			    (dut->ap_interface_6g && dut->ap_interface_2g) ||
+			    (dut->ap_interface_6g && dut->ap_interface_5g))
+				dut->ap_is_mlo = 1;
 		}
 	}
 
@@ -1301,7 +1305,8 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		break;
 	}
 
-	if (dut->ap_is_dual)
+	/* use_5g is used to determine hw_mode, so also set it for mlo case */
+	if (dut->ap_is_dual || dut->ap_is_mlo)
 		dut->use_5g = 1;
 
 	val = get_param(cmd, "WME");
@@ -9106,6 +9111,12 @@ write_conf:
 					fprintf(f, "hw_mode=a\n");
 				else
 					fprintf(f, "hw_mode=g\n");
+			} else if (dut->ap_is_mlo) {
+				if (link_band == AP_BAND_5GHz ||
+				    link_band == AP_BAND_6GHz)
+					fprintf(f, "hw_mode=a\n");
+				else
+					fprintf(f, "hw_mode=g\n");
 			} else {
 				fprintf(f, "hw_mode=a\n");
 			}
@@ -10225,7 +10236,7 @@ skip_vht_parameters_set:
 	}
 	fclose(f);
 
-	if (dut->ap_is_dual && conf_counter == 0) {
+	if ((dut->ap_is_dual || dut->ap_is_mlo) && conf_counter == 0) {
 		conf_counter++;
 		goto write_conf;
 	}
@@ -10328,8 +10339,8 @@ skip_vht_parameters_set:
 			 dut->use_hostapd_pid_file ?
 			 " -P " SIGMA_DUT_HOSTAPD_PID_FILE : "",
 			 dut->sigma_tmpdir,
-			 dut->ap_is_dual ? dut->sigma_tmpdir : "",
-			 dut->ap_is_dual ? "/sigma_dut-ap_0.conf" : "");
+			 (dut->ap_is_dual || dut->ap_is_mlo) ? dut->sigma_tmpdir : "",
+			 (dut->ap_is_dual || dut->ap_is_mlo) ? "/sigma_dut-ap_0.conf" : "");
 	}
 
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "hostapd command: %s", buf);
@@ -11089,6 +11100,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_addba_reject = VALUE_NOT_SET;
 	dut->ap_noack = VALUE_NOT_SET;
 	dut->ap_is_dual = 0;
+	dut->ap_is_mlo = 0;
 	dut->ap_mode = AP_inval;
 	dut->ap_mode_1 = AP_inval;
 	dut->ap_channel_1 = 0;
