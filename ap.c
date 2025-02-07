@@ -9309,7 +9309,10 @@ write_conf:
 	if (conf_counter == 1) {
 		char ifname2[50];
 
-		snprintf(ifname2, sizeof(ifname2), "%s_1", ifname);
+		if (dut->ap_is_mlo)
+			snprintf(ifname2, sizeof(ifname2), "%s", ifname);
+		else
+			snprintf(ifname2, sizeof(ifname2), "%s_1", ifname);
 		if (if_nametoindex(ifname2) == 0) {
 			if (ap_create_or_remove_interface(dut, ifname2, true)
 			    >= 0) {
