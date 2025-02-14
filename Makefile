@@ -89,6 +89,10 @@ CFLAGS += -DNL80211_SUPPORT -I /usr/include/libnl3
 LIBS += -lnl-3 -lnl-genl-3
 endif
 
+ifdef ASAN
+LIBS += -lasan
+endif
+
 sigma_dut: $(OBJS)
 	$(LDO) $(LDFLAGS) -o sigma_dut $(OBJS) $(LIBS)
 
