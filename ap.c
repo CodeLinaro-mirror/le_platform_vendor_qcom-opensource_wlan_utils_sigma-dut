@@ -1346,6 +1346,10 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	if (val)
 		dut->ap_bcnint = atoi(val);
 
+	val = get_param(cmd, "DTIM");
+	if (val && dut->ap_mode == AP_11be)
+		dut->ap_mlo_links[mlo_config_band].dtim = atoi(val);
+
 	val = get_param(cmd, "RADIO");
 	if (val) {
 		enum driver_type drv = get_driver_type(dut);
@@ -9696,6 +9700,12 @@ skip_key_mgmt:
 	if (dut->ap_beacon_prot)
 		fprintf(f, "beacon_prot=1\n");
 
+	if (dut->ap_mode == AP_11be) {
+		if (dut->ap_mlo_links[link_band].dtim)
+			fprintf(f, "dtim_period=%d\n",
+				dut->ap_mlo_links[link_band].dtim);
+	}
+
 	if (dut->ap_transition_disable)
 		fprintf(f, "transition_disable=0x%02x\n",
 			dut->ap_transition_disable);
@@ -11081,8 +11091,10 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 		dut->ap_tag_channel[i] = 0;
 	}
 
-	for (i = 0; i < AP_BAND_MAX; i++)
+	for (i = 0; i < AP_BAND_MAX; i++) {
 		dut->ap_mlo_links[i].configured = false;
+		dut->ap_mlo_links[i].dtim = 0;
+	}
 
 	drv = get_driver_type(dut);
 

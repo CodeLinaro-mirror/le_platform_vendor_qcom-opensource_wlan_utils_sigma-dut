@@ -605,6 +605,7 @@ struct ap_mlo_link {
 	bool configured;
 	int chwidth;
 	int channel;
+	int dtim;
 };
 
 enum ap_band {
