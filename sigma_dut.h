@@ -202,6 +202,7 @@ struct wfa_cs_p2p_group {
 	int go;
 	char grpid[P2P_GRP_ID_LEN];
 	char ssid[33];
+	char peer_mac[20];
 };
 
 #ifdef CONFIG_TRAFFIC_AGENT
@@ -526,6 +527,35 @@ struct mdnss_discovery_info {
 };
 #endif /* ANDROID_MDNS */
 
+enum sigma_akm_suites {
+	SIGMA_AKM_WPA_PSK = 0,
+	SIGMA_AKM_FT_PSK,
+	SIGMA_AKM_PSK_SHA256,
+	SIGMA_AKM_SAE,
+	SIGMA_AKM_FT_SAE,
+	SIGMA_AKM_SAE_EXT_KEY,
+	SIGMA_AKM_FT_SAE_EXT_KEY,
+	SIGMA_AKM_FT_802_1X,
+	SIGMA_AKM_FT_802_1X_SHA384,
+	SIGMA_AKM_SUITE_B,
+	SIGMA_AKM_SUITE_B_192,
+	SIGMA_AKM_FILS_SHA256,
+	SIGMA_AKM_FILS_SHA384,
+	SIGMA_AKM_FT_FILS_SHA256,
+	SIGMA_AKM_FT_FILS_SHA384,
+};
+
+enum sigma_cipher_suites {
+	SIGMA_CIPHER_CCMP = 0,
+	SIGMA_CIPHER_GCMP,
+	SIGMA_CIPHER_CCMP_256,
+	SIGMA_CIPHER_GCMP_256,
+	SIGMA_CIPHER_AES_128_CMAC,
+	SIGMA_CIPHER_BIP_GMAC_128,
+	SIGMA_CIPHER_BIP_GMAC_256,
+	SIGMA_CIPHER_BIP_CMAC_256,
+};
+
 struct sigma_dut {
 	const char *main_ifname;
 	char *main_ifname_2g;
@@ -536,6 +566,8 @@ struct sigma_dut {
 	char *p2p_ifname_buf;
 	int use_5g;
 	int ap_band_6g;
+	int ap_center_freq;
+	int ap_punct_bitmap;
 	int sta_2g_started;
 	int sta_5g_started;
 
@@ -637,6 +669,7 @@ struct sigma_dut {
 		AP_11ac,
 		AP_11ad,
 		AP_11ax,
+		AP_11be,
 		AP_inval
 	} ap_mode;
 	int ap_channel;
@@ -672,6 +705,7 @@ struct sigma_dut {
 		AP_40,
 		AP_80,
 		AP_160,
+		AP_320,
 		AP_80_80,
 		AP_AUTO
 	} ap_chwidth;
@@ -700,6 +734,7 @@ struct sigma_dut {
 		AP_WPA2_PSK_SHA256,
 		AP_WPA2_ENT_FT_EAP,
 		AP_OSEN,
+		AP_WPA3_SAE_EXT,
 	} ap_key_mgmt;
 	enum ap_tag_key_mgmt {
 		AP2_OPEN,
@@ -809,7 +844,8 @@ struct sigma_dut {
 	enum ap_vht_chwidth {
 		AP_20_40_VHT_OPER_CHWIDTH,
 		AP_80_VHT_OPER_CHWIDTH,
-		AP_160_VHT_OPER_CHWIDTH
+		AP_160_VHT_OPER_CHWIDTH,
+		AP_320_VHT_OPER_CHWIDTH
 	} ap_vht_chwidth;
 	int ap_txBF;
 	int ap_mu_txBF;
@@ -898,6 +934,11 @@ struct sigma_dut {
 	int he_srctrl_allow;
 
 	int ap_ocvc;
+	int ap_cad_unsolicited_proberesp;
+	int ltf_trig;
+	int eht_txmcs;
+	int ap_addba_amsdu;
+	unsigned int ap_ehtmcs_map;
 
 	enum value_not_set_enabled_disabled ap_oce;
 	enum value_not_set_enabled_disabled ap_filsdscv;
@@ -916,6 +957,17 @@ struct sigma_dut {
 	enum value_not_set_enabled_disabled ap_twtresp;
 	enum value_not_set_enabled_disabled he_sounding;
 	enum value_not_set_enabled_disabled he_set_sta_1x1;
+	enum value_not_set_enabled_disabled ap_unsolicited_proberesp;
+	enum value_not_set_enabled_disabled ap_activeind_proberesp;
+	enum value_not_set_enabled_disabled ap_6g_legacy_security;
+	enum value_not_set_enabled_disabled ap_fullbw_ulmumimo;
+	enum value_not_set_enabled_disabled ap_twtinfoframerx;
+	enum value_not_set_enabled_disabled ap_ulmudata_disablerx;
+	enum value_not_set_enabled_disabled ap_btwt;
+	enum value_not_set_enabled_disabled nontrigger_txbf;
+	enum value_not_set_enabled_disabled ap_preamblepunct;
+	enum value_not_set_enabled_disabled eht_omctrl;
+	enum value_not_set_enabled_disabled eht_txemlomn;
 
 	enum ppdu {
 		PPDU_NOT_SET,
@@ -930,6 +982,7 @@ struct sigma_dut {
 		BA_BUFSIZE_NOT_SET,
 		BA_BUFSIZE_64,
 		BA_BUFSIZE_256,
+		BA_BUFSIZE_1024,
 	} ap_ba_bufsize;
 
 	enum mimo {
@@ -1027,6 +1080,8 @@ struct sigma_dut {
 		PROGRAM_HS2_2022,
 		PROGRAM_LOCR2,
 		PROGRAM_EHT,
+		PROGRAM_PR,
+		PROGRAM_P2P,
 	} program;
 
 	enum device_type {
@@ -1138,6 +1193,7 @@ struct sigma_dut {
 #ifdef NL80211_SUPPORT
 	struct nl80211_ctx *nl_ctx;
 	int config_rsnie;
+	int config_random_pmkid;
 #endif /* NL80211_SUPPORT */
 
 	int sta_nss;
@@ -1164,6 +1220,11 @@ struct sigma_dut {
 		SAE_PWE_LOOP,
 		SAE_PWE_H2E
 	} sae_pwe;
+	enum {
+		SEC_OPEN,
+		SEC_MAC,
+		SEC_PHY
+	} sectype;
 	int owe_ptk_workaround;
 	struct dut_hw_modes hw_modes;
 	int ocvc;
@@ -1199,6 +1260,15 @@ struct sigma_dut {
 #endif /* ANDROID_MDNS */
 	char host_name[100];
 	int sta_roaming_disabled;
+	int key_mgmt_capa; /* bitmap of enum sigma_akm_suites values */
+	int pairwise_ciphers_capa; /* bitmap of enum sigma_cipher_suites values
+				    */
+	int group_ciphers_capa; /* bitmap of enum sigma_cipher_suites values */
+	int group_mgmt_ciphers_capa; /* bitmap of enum sigma_cipher_suites
+				      * values */
+	bool usd_enabled;
+	bool p2p_r2_capable;
+	u8 pasn_type;
 };
 
 
@@ -1343,6 +1413,8 @@ int sta_set_addba_buf_size(struct sigma_dut *dut,
 			   const char *intf, int bufsize);
 int wcn_set_he_gi(struct sigma_dut *dut, const char *intf, u8 gi_val);
 #ifdef NL80211_SUPPORT
+int wcn_set_link_gi(struct sigma_dut *dut, const char *intf, int link_id,
+		    u8 gi_val);
 int wcn_set_he_ltf(struct sigma_dut *dut, const char *intf,
 		   enum qca_wlan_he_ltf_cfg ltf);
 #endif /* NL80211_SUPPORT */
@@ -1359,9 +1431,10 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go);
 void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go);
 int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
 		      const char *peer, int full);
-enum sigma_cmd_result cmd_sta_p2p_reset(struct sigma_dut *dut,
-					struct sigma_conn *conn,
-					struct sigma_cmd *cmd);
+const char * get_p2p_group_ifname(struct sigma_dut *dut, const char *ifname);
+enum sigma_cmd_result sta_p2p_reset_default(struct sigma_dut *dut,
+					    struct sigma_conn *conn,
+					    struct sigma_cmd *cmd);
 
 /* basic.c */
 void basic_register_cmds(void);
@@ -1390,6 +1463,8 @@ size_t strlcpy(char *dest, const char *src, size_t siz);
 size_t strlcat(char *dst, const char *str, size_t size);
 #endif /* ANDROID */
 void hex_dump(struct sigma_dut *dut, u8 *data, size_t len);
+int snprintf_hex(char *buf, size_t buf_size, const uint8_t *data,
+		size_t len, bool uppercase);
 int get_wps_pin_from_mac(struct sigma_dut *dut, const char *macaddr,
 			 char *pin, size_t len);
 void str_remove_chars(char *str, char ch);
@@ -1436,6 +1511,8 @@ int lowi_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 int loc_r2_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
+int loc_pr_cmd_dev_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd);
 
 /* dpp.c */
 enum sigma_cmd_result dpp_dev_exec_action(struct sigma_dut *dut,
@@ -1481,6 +1558,8 @@ int set_ipv6_addr(struct sigma_dut *dut, const char *ip, const char *mask,
 		  const char *ifname);
 void kill_pid(struct sigma_dut *dut, const char *pid_file);
 int get_ip_addr(const char *ifname, int ipv6, char *buf, size_t len);
+int chan_to_freq(int chan, bool is_6g);
+int freq_to_chan(int freq);
 bool is_6ghz_freq(int freq);
 
 enum sigma_cmd_result dev_start_test_log(struct sigma_dut *dut,
@@ -1489,5 +1568,10 @@ enum sigma_cmd_result dev_start_test_log(struct sigma_dut *dut,
 
 /* dnssd.c */
 int mdnssd_init(struct sigma_dut *dut);
+
+/* p2p_usd.c */
+enum sigma_cmd_result usd_cmd_sta_exec_action(struct sigma_dut *dut,
+					      struct sigma_conn *conn,
+					      struct sigma_cmd *cmd);
 
 #endif /* SIGMA_DUT_H */
