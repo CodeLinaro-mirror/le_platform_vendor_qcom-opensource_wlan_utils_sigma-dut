@@ -3378,16 +3378,23 @@ static void owrt_ap_set_vap(struct sigma_dut *dut, int id, const char *key,
 			    const char *val)
 {
 	char buf[256];
+	int res;
 
 	if (val == NULL) {
-		snprintf(buf, sizeof(buf),
-			 "uci delete wireless.@wifi-iface[%d].%s", id, key);
+		res = snprintf(buf, sizeof(buf),
+			       "uci delete wireless.@wifi-iface[%d].%s",
+			       id, key);
+		if (res < 0 || res >= sizeof(buf))
+			return;
 		run_system(dut, buf);
 		return;
 	}
 
-	snprintf(buf, sizeof(buf), "uci set wireless.@wifi-iface[%d].%s=%s",
-		 id, key, val);
+	res = snprintf(buf, sizeof(buf),
+		       "uci set wireless.@wifi-iface[%d].%s=%s",
+		       id, key, val);
+	if (res < 0 || res >= sizeof(buf))
+		return;
 	run_system(dut, buf);
 }
 
@@ -3396,17 +3403,23 @@ static void owrt_ap_set_list_vap(struct sigma_dut *dut, int id,
 				 const char *key, const char *val)
 {
 	char buf[1024];
+	int res;
 
 	if (val == NULL) {
-		snprintf(buf, sizeof(buf),
-			 "uci del_list wireless.@wifi-iface[%d].%s", id, key);
+		res = snprintf(buf, sizeof(buf),
+			       "uci del_list wireless.@wifi-iface[%d].%s",
+			       id, key);
+		if (res < 0 || res >= sizeof(buf))
+			return;
 		run_system(dut, buf);
 		return;
 	}
 
-	snprintf(buf, sizeof(buf),
-		 "uci add_list wireless.@wifi-iface[%d].%s=%s",
-		 id, key, val);
+	res = snprintf(buf, sizeof(buf),
+		       "uci add_list wireless.@wifi-iface[%d].%s=%s",
+		       id, key, val);
+	if (res < 0 || res >= sizeof(buf))
+		return;
 	run_system(dut, buf);
 }
 
@@ -13240,6 +13253,67 @@ int ap_wps_registration(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static enum sigma_cmd_result ap_get_tk(struct sigma_dut *dut,
+				       struct sigma_conn *conn,
+				       struct sigma_cmd *cmd)
+{
+	const char *intf = get_param(cmd, "Interface");
+	const char *mac = get_param(cmd, "STA_MAC_Address");
+	char buf[4096], resp[200], *pos, *tmp;
+
+	if (!mac)
+		return INVALID_SEND_STATUS;
+
+	if (hapd_command_resp(intf, "PTKSA_CACHE_LIST", buf, sizeof(buf)) < 0 ||
+	    strncmp(buf, "UNKNOWN COMMAND", 15) == 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,PTKSA_CACHE_LIST not supported");
+		return STATUS_SENT_ERROR;
+	}
+
+	/* Format: Index MAC_ADDR CHIPHER Expiration_time(sec) TK KDK */
+
+	pos = buf;
+	while (pos) {
+		pos = strchr(pos, ' ');
+		if (!pos)
+			break;
+		pos++;
+		if (strncasecmp(pos, mac, 17) == 0) {
+			pos = strchr(pos, ' ');
+			if (!pos)
+				break;
+			pos++;
+			pos = strchr(pos, ' ');
+			if (!pos)
+				break;
+			pos++;
+			pos = strchr(pos, ' ');
+			if (!pos)
+				break;
+			tmp = strchr(pos, ' ');
+			if (!tmp)
+				break;
+			*tmp = '\0';
+			break;
+		}
+		pos = strchr(pos, '\n');
+		if (pos)
+			pos++;
+	}
+
+	if (!pos) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,TK not available");
+		return STATUS_SENT_ERROR;
+	}
+
+	snprintf(resp, sizeof(resp), "TK,%s", pos);
+	send_resp(dut, conn, SIGMA_COMPLETE, resp);
+	return STATUS_SENT;
+}
+
+
 static enum sigma_cmd_result cmd_ap_get_parameter(struct sigma_dut *dut,
 						  struct sigma_conn *conn,
 						  struct sigma_cmd *cmd)
@@ -13285,6 +13359,8 @@ static enum sigma_cmd_result cmd_ap_get_parameter(struct sigma_dut *dut,
 			return STATUS_SENT_ERROR;
 		}
 		memcpy(resp, "PMK,", 4);
+	} else if (strcasecmp(param, "TK") == 0) {
+		return ap_get_tk(dut, conn, cmd);
 	} else {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "ErrorCode,Unsupported parameter");
