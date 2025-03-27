@@ -202,6 +202,7 @@ struct wfa_cs_p2p_group {
 	int go;
 	char grpid[P2P_GRP_ID_LEN];
 	char ssid[33];
+	char peer_mac[20];
 };
 
 #ifdef CONFIG_TRAFFIC_AGENT
@@ -534,6 +535,14 @@ enum sigma_akm_suites {
 	SIGMA_AKM_FT_SAE,
 	SIGMA_AKM_SAE_EXT_KEY,
 	SIGMA_AKM_FT_SAE_EXT_KEY,
+	SIGMA_AKM_FT_802_1X,
+	SIGMA_AKM_FT_802_1X_SHA384,
+	SIGMA_AKM_SUITE_B,
+	SIGMA_AKM_SUITE_B_192,
+	SIGMA_AKM_FILS_SHA256,
+	SIGMA_AKM_FILS_SHA384,
+	SIGMA_AKM_FT_FILS_SHA256,
+	SIGMA_AKM_FT_FILS_SHA384,
 };
 
 enum sigma_cipher_suites {
@@ -1071,6 +1080,8 @@ struct sigma_dut {
 		PROGRAM_HS2_2022,
 		PROGRAM_LOCR2,
 		PROGRAM_EHT,
+		PROGRAM_PR,
+		PROGRAM_P2P,
 	} program;
 
 	enum device_type {
@@ -1209,6 +1220,11 @@ struct sigma_dut {
 		SAE_PWE_LOOP,
 		SAE_PWE_H2E
 	} sae_pwe;
+	enum {
+		SEC_OPEN,
+		SEC_MAC,
+		SEC_PHY
+	} sectype;
 	int owe_ptk_workaround;
 	struct dut_hw_modes hw_modes;
 	int ocvc;
@@ -1250,6 +1266,9 @@ struct sigma_dut {
 	int group_ciphers_capa; /* bitmap of enum sigma_cipher_suites values */
 	int group_mgmt_ciphers_capa; /* bitmap of enum sigma_cipher_suites
 				      * values */
+	bool usd_enabled;
+	bool p2p_r2_capable;
+	u8 pasn_type;
 };
 
 
@@ -1412,9 +1431,10 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go);
 void stop_dhcp(struct sigma_dut *dut, const char *group_ifname, int go);
 int p2p_discover_peer(struct sigma_dut *dut, const char *ifname,
 		      const char *peer, int full);
-enum sigma_cmd_result cmd_sta_p2p_reset(struct sigma_dut *dut,
-					struct sigma_conn *conn,
-					struct sigma_cmd *cmd);
+const char * get_p2p_group_ifname(struct sigma_dut *dut, const char *ifname);
+enum sigma_cmd_result sta_p2p_reset_default(struct sigma_dut *dut,
+					    struct sigma_conn *conn,
+					    struct sigma_cmd *cmd);
 
 /* basic.c */
 void basic_register_cmds(void);
@@ -1491,6 +1511,8 @@ int lowi_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
 int loc_r2_cmd_sta_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
 			       struct sigma_cmd *cmd);
+int loc_pr_cmd_dev_exec_action(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd);
 
 /* dpp.c */
 enum sigma_cmd_result dpp_dev_exec_action(struct sigma_dut *dut,
@@ -1546,5 +1568,10 @@ enum sigma_cmd_result dev_start_test_log(struct sigma_dut *dut,
 
 /* dnssd.c */
 int mdnssd_init(struct sigma_dut *dut);
+
+/* p2p_usd.c */
+enum sigma_cmd_result usd_cmd_sta_exec_action(struct sigma_dut *dut,
+					      struct sigma_conn *conn,
+					      struct sigma_cmd *cmd);
 
 #endif /* SIGMA_DUT_H */
