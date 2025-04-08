@@ -958,6 +958,12 @@ static int sigma_nan_subscribe_request(struct sigma_dut *dut,
 				"%s: NAN Bootstrapping Method: %d", __func__,
 				dut->dev_info.bootstrapping_methods);
 	}
+
+	if (dut->dev_info.npk_nik_caching && dut->dev_info.nik_valid) {
+		req.nan_pairing_config.enable_pairing_verification = 1;
+		memcpy(req.nan_identity_key, dut->dev_info.nik,
+		       sizeof(req.nan_identity_key));
+	}
 #endif /* WFA_CERT_NANR4 */
 
 	ret = nan_subscribe_request(0, dut->wifi_hal_iface_handle, &req);
@@ -1809,9 +1815,6 @@ void nan_event_pairing_confirm(NanPairingConfirmInd *event)
 	if (event->rsp_code == NAN_PAIRING_REQUEST_ACCEPT) {
 		sigma_dut_print(global_dut, DUT_MSG_INFO,
 				"Pairing Confirm Success");
-		memcpy(global_dut->dev_info.nik,
-		       event->npk_security_association.local_nan_identity_key,
-		       NAN_IDENTITY_KEY_LEN);
 		memcpy(global_dut->peer_info.nik,
 		       event->npk_security_association.peer_nan_identity_key,
 		       NAN_IDENTITY_KEY_LEN);
@@ -1885,6 +1888,10 @@ int sigma_nan_pairing_verification(struct sigma_dut *dut,
 
 	if (dut->dev_info.npk_nik_caching || dut->peer_info.npk_nik_caching)
 		req.enable_pairing_cache = true;
+
+	if (dut->dev_info.npk_nik_caching && dut->dev_info.nik_valid)
+		memcpy(req.nan_identity_key, dut->dev_info.nik,
+		       sizeof(req.nan_identity_key));
 
 	sigma_dut_print(dut, DUT_MSG_INFO,
 			"Pairing Verification Request params: npk_nik_cache %d, peer MAC: "
@@ -2293,6 +2300,12 @@ int sigma_nan_publish_request(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut->dev_info.bootstrapping_methods);
 	}
 
+	if (dut->dev_info.npk_nik_caching && dut->dev_info.nik_valid) {
+		req.nan_pairing_config.enable_pairing_verification = 1;
+		memcpy(req.nan_identity_key, dut->dev_info.nik,
+		       sizeof(req.nan_identity_key));
+	}
+
 	if (s3_capabilities) {
 		req.s3_capabilities = atoi(s3_capabilities);
 		sigma_dut_print(dut, DUT_MSG_INFO,
@@ -2687,8 +2700,6 @@ int sigma_nan_bootstrapping_indication_response(struct sigma_dut *dut,
 		dut->peer_info.bs_state = NAN_BOOTSTRAP_COMEBACK_RSP_SENT;
 	} else {
 		dut->peer_info.bs_state = NAN_BOOTSTRAPPING_DONE;
-		dut->peer_info.selected_bootstrap_method =
-			(int) strtol(pairing_bootstrapmethod, NULL, 0);
 	}
 	sigma_dut_print(dut, DUT_MSG_DEBUG,
 			"NAN Bootsrapping Indication Response sent");
@@ -3189,9 +3200,17 @@ void nan_init(struct sigma_dut *dut)
 	}
 	pthread_mutex_init(&gMutex, NULL);
 	pthread_cond_init(&gCondition, NULL);
-	if (dut->wifi_hal_iface_handle)
+	if (dut->wifi_hal_iface_handle) {
 		nan_register_handler(dut->wifi_hal_iface_handle,
 				     callbackHandler);
+#ifdef WFA_CERT_NANR4
+		if (if_nametoindex(NAN_AWARE_IFACE))
+			run_system_wrapper(dut, "ifconfig %s up",
+					   NAN_AWARE_IFACE);
+
+		nan_get_capabilities(0, dut->wifi_hal_iface_handle);
+#endif /* WFA_CERT_NANR4 */
+	}
 }
 
 
@@ -3256,6 +3275,10 @@ void nan_cmd_sta_reset_default(struct sigma_dut *dut, struct sigma_conn *conn,
 #ifdef WFA_CERT_NANR4
 	memset(&dut->dev_info, 0, sizeof(struct device_pairing_info));
 	memset(&dut->peer_info, 0, sizeof(struct peer_pairing_info));
+
+	if (random_get_bytes(dut->dev_info.nik, NAN_NIK_LEN) == 0)
+		dut->dev_info.nik_valid = true;
+
 #endif /* WFA_CERT_NANR4 */
 }
 
@@ -3552,8 +3575,7 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 	u32 sched_update_channel_freq;
 #endif
 #ifdef WFA_CERT_NANR4
-	int i;
-	char *temp;
+	int i, num, pos;
 	char string[100];
 	wifi_error ret;
 #endif /* WFA_CERT_NANR4 */
@@ -3668,10 +3690,18 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 			sigma_dut_print(dut, DUT_MSG_ERROR, "Request failed");
 			return -1;
 		}
-		temp = string;
-		for (i = 0; i < msg.tk_len; i++)
-			temp += sprintf(temp, "%02x", msg.tk[i]);
-		string[msg.tk_len * 2] = '\0';
+		pos = 0;
+		string[0] = '\0';
+		for (i = 0; i < msg.tk_len; i++) {
+			num = snprintf(&(string[pos]), sizeof(string) - pos,
+				       "%02x", msg.tk[i]);
+			if (num < 0 || num >= sizeof(string) - pos) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "Invalid TK");
+				return STATUS_SENT_ERROR;
+			}
+			pos += num;
+		}
 		snprintf(resp_buf, sizeof(resp_buf), "TK,%s", string);
 	} else if (strcasecmp(parameter, "PMKID") == 0) {
 		NanPairingPmkid msg;
@@ -3689,10 +3719,18 @@ int nan_cmd_sta_get_parameter(struct sigma_dut *dut, struct sigma_conn *conn,
 			sigma_dut_print(dut, DUT_MSG_ERROR, "Request failed");
 			return -1;
 		}
-		temp = string;
-		for (i = 0; i < msg.pmkid_len; i++)
-			temp += sprintf(temp, "%02x", msg.pmkid[i]);
-		string[msg.pmkid_len * 2] = '\0';
+		pos = 0;
+		string[0] = '\0';
+		for (i = 0; i < msg.pmkid_len; i++) {
+			num = snprintf(&(string[pos]), sizeof(string) - pos,
+				       "%02x", msg.pmkid[i]);
+			if (num < 0 || num >= sizeof(string) - pos) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "Invalid PMKID");
+				return STATUS_SENT_ERROR;
+			}
+			pos += num;
+		}
 		snprintf(resp_buf, sizeof(resp_buf), "PMKID,%s", string);
 #endif /* WFA_CERT_NANR4 */
 	} else {
