@@ -3017,6 +3017,7 @@ static enum sigma_cmd_result cmd_sta_set_eaptls(struct sigma_dut *dut,
 	int jb_or_newer = 0;
 	char prop[PROPERTY_VALUE_MAX];
 #endif /* ANDROID */
+	bool is_suiteb = false;
 
 	if (intf == NULL)
 		return -1;
@@ -3107,6 +3108,7 @@ static enum sigma_cmd_result cmd_sta_set_eaptls(struct sigma_dut *dut,
 
 	val = get_param(cmd, "keyMgmtType");
 	if (val && strcasecmp(val, "SuiteB") == 0) {
+		is_suiteb = true;
 		val = get_param(cmd, "CertType");
 		if (val && strcasecmp(val, "RSA") == 0) {
 			if (set_network_quoted(ifname, id, "phase1",
@@ -3133,6 +3135,12 @@ static enum sigma_cmd_result cmd_sta_set_eaptls(struct sigma_dut *dut,
 		sigma_dut_print(dut, DUT_MSG_INFO, "Enable only TLS v1.3");
 		if (set_network_quoted(ifname, id, "phase1",
 				       "tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=1 tls_disable_tlsv1_3=0") < 0)
+			return ERROR_SEND_STATUS;
+	} else if (!is_suiteb) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Enable TLS v1.0/v1.1/v1.2 (override system defaults)");
+		if (set_network_quoted(ifname, id, "phase1",
+				       "tls_disable_tlsv1_0=0 tls_disable_tlsv1_1=0 tls_disable_tlsv1_2=0") < 0)
 			return ERROR_SEND_STATUS;
 	}
 
@@ -3474,35 +3482,35 @@ static int get_key_mgmt_capa(struct sigma_dut *dut)
 
 	res = strtok_r(key_mgmt, " ", &saveptr);
 	while (res) {
-		if (strcmp(res, "WPA-PSK"))
+		if (strcmp(res, "WPA-PSK") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_WPA_PSK);
-		if (strcmp(res, "WPA-PSK-SHA256"))
+		if (strcmp(res, "WPA-PSK-SHA256") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_PSK_SHA256);
-		if (strcmp(res, "FT-PSK"))
+		if (strcmp(res, "FT-PSK") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_PSK);
-		if (strcmp(res, "SAE"))
+		if (strcmp(res, "SAE") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_SAE);
-		if (strcmp(res, "FT-SAE"))
+		if (strcmp(res, "FT-SAE") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_SAE);
-		if (strcmp(res, "SAE-EXT-KEY"))
+		if (strcmp(res, "SAE-EXT-KEY") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_SAE_EXT_KEY);
-		if (strcmp(res, "FT-SAE-EXT-KEY"))
+		if (strcmp(res, "FT-SAE-EXT-KEY") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_SAE_EXT_KEY);
-		if (strcmp(res, "FT-EAP"))
+		if (strcmp(res, "FT-EAP") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_802_1X);
-		if (strcmp(res, "FT-EAP-SHA384"))
+		if (strcmp(res, "FT-EAP-SHA384") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_802_1X_SHA384);
-		if (strcmp(res, "WPA-EAP-SUITE-B"))
+		if (strcmp(res, "WPA-EAP-SUITE-B") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_SUITE_B);
-		if (strcmp(res, "WPA-EAP-SUITE-B-192"))
+		if (strcmp(res, "WPA-EAP-SUITE-B-192") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_SUITE_B_192);
-		if (strcmp(res, "FILS-SHA256"))
+		if (strcmp(res, "FILS-SHA256") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FILS_SHA256);
-		if (strcmp(res, "FILS-SHA384"))
+		if (strcmp(res, "FILS-SHA384") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FILS_SHA384);
-		if (strcmp(res, "FT-FILS-SHA256"))
+		if (strcmp(res, "FT-FILS-SHA256") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_FILS_SHA256);
-		if (strcmp(res, "FT-FILS-SHA384"))
+		if (strcmp(res, "FT-FILS-SHA384") == 0)
 			dut->key_mgmt_capa |= BIT(SIGMA_AKM_FT_FILS_SHA384);
 
 		res = strtok_r(NULL, " ", &saveptr);
@@ -3534,14 +3542,14 @@ static int get_pairwise_ciphers_capa(struct sigma_dut *dut)
 
 	res = strtok_r(pairwise_ciphers, " ", &saveptr);
 	while (res) {
-		if (strcmp(res, "CCMP"))
+		if (strcmp(res, "CCMP") == 0)
 			dut->pairwise_ciphers_capa |= BIT(SIGMA_CIPHER_CCMP);
-		if (strcmp(res, "GCMP"))
+		if (strcmp(res, "GCMP") == 0)
 			dut->pairwise_ciphers_capa |= BIT(SIGMA_CIPHER_GCMP);
-		if (strcmp(res, "CCMP-256"))
+		if (strcmp(res, "CCMP-256") == 0)
 			dut->pairwise_ciphers_capa |=
 				BIT(SIGMA_CIPHER_CCMP_256);
-		if (strcmp(res, "GCMP-256"))
+		if (strcmp(res, "GCMP-256") == 0)
 			dut->pairwise_ciphers_capa |=
 				BIT(SIGMA_CIPHER_GCMP_256);
 
@@ -3574,13 +3582,13 @@ static int get_group_ciphers_capa(struct sigma_dut *dut)
 
 	res = strtok_r(group_ciphers, " ", &saveptr);
 	while (res) {
-		if (strcmp(res, "CCMP"))
+		if (strcmp(res, "CCMP") == 0)
 			dut->group_ciphers_capa |= BIT(SIGMA_CIPHER_CCMP);
-		if (strcmp(res, "GCMP"))
+		if (strcmp(res, "GCMP") == 0)
 			dut->group_ciphers_capa |= BIT(SIGMA_CIPHER_GCMP);
-		if (strcmp(res, "CCMP-256"))
+		if (strcmp(res, "CCMP-256") == 0)
 			dut->group_ciphers_capa |= BIT(SIGMA_CIPHER_CCMP_256);
-		if (strcmp(res, "GCMP-256"))
+		if (strcmp(res, "GCMP-256") == 0)
 			dut->group_ciphers_capa |= BIT(SIGMA_CIPHER_GCMP_256);
 
 		res = strtok_r(NULL, " ", &saveptr);
@@ -3614,16 +3622,16 @@ static int get_group_mgmt_ciphers_capa(struct sigma_dut *dut)
 
 	res = strtok_r(group_mgmt_ciphers, " ", &saveptr);
 	while (res) {
-		if (strcmp(res, "AES-128-CMAC"))
+		if (strcmp(res, "AES-128-CMAC") == 0)
 			dut->group_mgmt_ciphers_capa |=
 				BIT(SIGMA_CIPHER_AES_128_CMAC);
-		if (strcmp(res, "BIP-GMAC-128"))
+		if (strcmp(res, "BIP-GMAC-128") == 0)
 			dut->group_mgmt_ciphers_capa |=
 				BIT(SIGMA_CIPHER_BIP_GMAC_128);
-		if (strcmp(res, "BIP-GMAC-256"))
+		if (strcmp(res, "BIP-GMAC-256") == 0)
 			dut->group_mgmt_ciphers_capa |=
 				BIT(SIGMA_CIPHER_BIP_GMAC_256);
-		if (strcmp(res, "BIP-CMAC-256"))
+		if (strcmp(res, "BIP-CMAC-256") == 0)
 			dut->group_mgmt_ciphers_capa |=
 				BIT(SIGMA_CIPHER_BIP_CMAC_256);
 
@@ -12133,7 +12141,7 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 	struct nl_msg *msg;
 	int ifindex, ret;
 	const char *val;
-	const char *intf = get_param(cmd, "Interface");
+	const char *intf;
 	int wake_interval_exp = 10, nominal_min_wake_dur = 255,
 		wake_interval_mantissa = 512;
 	int flow_type = 0, twt_trigger = 0, target_wake_time = 0,
@@ -12169,6 +12177,7 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		return -1;
 	}
 
+	intf = get_param(cmd, "Interface");
 	ifindex = if_nametoindex(intf);
 	if (ifindex == 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
