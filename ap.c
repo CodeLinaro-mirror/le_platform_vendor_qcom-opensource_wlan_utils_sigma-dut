@@ -970,12 +970,23 @@ static int wcn_set_txbf_periodic_ndp(struct sigma_dut *dut, const char *intf,
 
 
 static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
-					const char *punct_channel_list)
+					const char *punct_channel_list,
+					int mlo_band)
 {
 	int center_chan_idx, start_chan_idx, end_chan_idx;
-	int chwidth, punct_bitmap = 0;
+	int chwidth, punct_bitmap = 0, ap_chwidth, ap_channel, ap_band;
 
-	switch (dut->ap_chwidth) {
+	if (dut->ap_mode != AP_11be) {
+		ap_chwidth = dut->ap_chwidth;
+		ap_channel = dut->ap_channel;
+		ap_band = dut->ap_band;
+	} else {
+		ap_chwidth = dut->ap_mlo_links[mlo_band].chwidth;
+		ap_channel = dut->ap_mlo_links[mlo_band].channel;
+		ap_band = mlo_band;
+	}
+
+	switch (ap_chwidth) {
 	case AP_80:
 		chwidth = 80;
 		break;
@@ -1047,6 +1058,39 @@ static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
 }
 
 
+static int get_channel_band(int channel)
+{
+	int i;
+	int chan_list_2g[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
+	int chan_list_5g[] = { 36, 40, 44, 48, 52, 60, 64, 100, 104, 108,
+			       112, 116, 120, 124, 128, 132, 140, 144, 149,
+			       153, 157, 161, 165 };
+	int chan_list_6g[] = { 2, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41,
+			       45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85,
+			       89, 93, 97, 101, 105, 109, 113, 117, 121,
+			       125, 129, 133, 137, 141, 145, 149, 153, 157,
+			       161, 165, 169, 173, 177, 181, 185, 189, 193,
+			       197, 201, 205, 209, 213, 217, 221, 225, 229,
+			       233 };
+
+	for (i = 0; i < ARRAY_SIZE(chan_list_2g); i++) {
+		if (channel == chan_list_2g[i])
+			return AP_BAND_24GHz;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(chan_list_5g); i++) {
+		if (channel == chan_list_5g[i])
+			return AP_BAND_5GHz;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(chan_list_6g); i++) {
+		if (channel == chan_list_6g[i])
+			return AP_BAND_6GHz;
+	}
+
+	return AP_BAND_MAX;
+}
+
 static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 						 struct sigma_conn *conn,
 						 struct sigma_cmd *cmd)
@@ -1082,6 +1126,51 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 				  "errorCode,Invalid WLAN_TAG");
 			return STATUS_SENT;
 		}
+	}
+
+	val = get_param(cmd, "MODE");
+	if (val) {
+		char *str, *pos;
+
+		str = strdup(val);
+		if (str == NULL)
+			return INVALID_SEND_STATUS;
+		pos = strchr(str, ';');
+		if (pos)
+			*pos++ = '\0';
+		if (wlan_tag != 2)
+			dut->ap_is_dual = 0;
+		dut->ap_mode = get_mode(str);
+		if (dut->ap_mode == AP_inval) {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported MODE");
+			free(str);
+			return STATUS_SENT;
+		}
+		if (dut->ap_mode == AP_11ac && dut->ap_80plus80 != 1)
+			dut->ap_chwidth = AP_80;
+
+		if (pos) {
+			dut->ap_mode_1 = get_mode(pos);
+			if (dut->ap_mode_1 == AP_inval) {
+				send_resp(dut, conn, SIGMA_INVALID,
+					  "errorCode,Unsupported MODE");
+				free(str);
+				return STATUS_SENT;
+			}
+			if (dut->ap_mode_1 == AP_11ac)
+				dut->ap_chwidth_1 = AP_80;
+			dut->ap_is_dual = 1;
+		}
+
+		free(str);
+	} else if (dut->ap_mode == AP_inval) {
+		if (dut->ap_channel <= 11)
+			dut->ap_mode = AP_11ng;
+		else if (dut->program == PROGRAM_VHT)
+			dut->ap_mode = AP_11ac;
+		else
+			dut->ap_mode = AP_11na;
 	}
 
 	val = get_param(cmd, "Interface");
@@ -1186,8 +1275,21 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 			dut->ap_tag_channel[wlan_tag - 2] = atoi(val);
 		}
 
-		if (dut->ap_mode == AP_11be)
+		if (dut->ap_mode == AP_11be) {
+			if (mlo_config_band == -1) {
+				mlo_config_band = get_channel_band(atoi(val));
+				if (mlo_config_band == AP_BAND_MAX) {
+					send_resp(dut, conn, SIGMA_ERROR,
+						  "errorCode,Invalid value");
+					sigma_dut_print(dut, DUT_MSG_INFO,
+						"Invalid channel %d", atoi(val));
+					return STATUS_SENT;
+				}
+				dut->ap_mlo_links[mlo_config_band].configured =
+								true;
+			}
 			dut->ap_mlo_links[mlo_config_band].channel = atoi(val);
+		}
 	}
 
 	val = get_param(cmd, "ChnlFreq");
@@ -1227,51 +1329,6 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		else
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Unsupported dfs_mode value: %s", val);
-	}
-
-	val = get_param(cmd, "MODE");
-	if (val) {
-		char *str, *pos;
-
-		str = strdup(val);
-		if (str == NULL)
-			return INVALID_SEND_STATUS;
-		pos = strchr(str, ';');
-		if (pos)
-			*pos++ = '\0';
-		if (wlan_tag != 2)
-			dut->ap_is_dual = 0;
-		dut->ap_mode = get_mode(str);
-		if (dut->ap_mode == AP_inval) {
-			send_resp(dut, conn, SIGMA_INVALID,
-				  "errorCode,Unsupported MODE");
-			free(str);
-			return STATUS_SENT;
-		}
-		if (dut->ap_mode == AP_11ac && dut->ap_80plus80 != 1)
-			dut->ap_chwidth = AP_80;
-
-		if (pos) {
-			dut->ap_mode_1 = get_mode(pos);
-			if (dut->ap_mode_1 == AP_inval) {
-				send_resp(dut, conn, SIGMA_INVALID,
-					  "errorCode,Unsupported MODE");
-				free(str);
-				return STATUS_SENT;
-			}
-			if (dut->ap_mode_1 == AP_11ac)
-				dut->ap_chwidth_1 = AP_80;
-			dut->ap_is_dual = 1;
-		}
-
-		free(str);
-	} else if (dut->ap_mode == AP_inval) {
-		if (dut->ap_channel <= 11)
-			dut->ap_mode = AP_11ng;
-		else if (dut->program == PROGRAM_VHT)
-			dut->ap_mode = AP_11ac;
-		else
-			dut->ap_mode = AP_11na;
 	}
 
 	/* Override the AP mode in case of 60 GHz */
@@ -2594,7 +2651,8 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 
 	val = get_param(cmd, "PunctChannel");
 	if (val) {
-		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(dut, val);
+		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(
+						dut, val, mlo_config_band);
 		if (dut->ap_punct_bitmap < 0) {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Invalid PunctChannel");
@@ -15396,6 +15454,7 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	const char *val;
 	const char *ifname;
 	const char *type = get_param(cmd, "type");
+	int ap_chwidth, mlo_band = 0;
 
 	ifname = get_main_ifname(dut);
 
@@ -15403,28 +15462,49 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	if (val && wcn_vht_chnum_band(dut, ifname, type, val) < 0)
 		return ERROR_SEND_STATUS;
 
+	if (dut->ap_mode != AP_11be)
+		ap_chwidth = dut->ap_chwidth;
+	else {
+		val = get_param(cmd, "Interface");
+		if (val) {
+			if (strcasecmp(val, "5G") == 0)
+				mlo_band = AP_BAND_5GHz;
+			else if (strcasecmp(val, "24G") == 0)
+				mlo_band = AP_BAND_24GHz;
+			else
+				mlo_band = AP_BAND_6GHz;
+		}
+		ap_chwidth = dut->ap_mlo_links[mlo_band].chwidth;
+	}
+
 	val = get_param(cmd, "txBandwidth");
 	if (val) {
-		int old_ch_bw = dut->ap_chwidth;
+		int old_ch_bw = ap_chwidth;
 
 		if (strcasecmp(val, "Auto") == 0) {
-			dut->ap_chwidth = 0;
+			ap_chwidth = 0;
 		} else if (strcasecmp(val, "20") == 0) {
-			dut->ap_chwidth = 0;
+			ap_chwidth = 0;
 		} else if (strcasecmp(val, "40") == 0) {
-			dut->ap_chwidth = 1;
+			ap_chwidth = 1;
 		} else if (strcasecmp(val, "80") == 0) {
-			dut->ap_chwidth = 2;
+			ap_chwidth = 2;
 		} else if (strcasecmp(val, "160") == 0) {
-			dut->ap_chwidth = 3;
+			ap_chwidth = 3;
 		} else if (strcasecmp(val, "320") == 0) {
-			dut->ap_chwidth = 4;
+			ap_chwidth = 4;
 		} else {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,WIDTH not supported");
 			return STATUS_SENT_ERROR;
 		}
-		if (old_ch_bw != dut->ap_chwidth) {
+		if (old_ch_bw != ap_chwidth) {
+			if (dut->ap_mode != AP_11be)
+				dut->ap_chwidth = ap_chwidth;
+			else
+				dut->ap_mlo_links[mlo_band].chwidth =
+							ap_chwidth;
+
 			if (cmd_ap_config_commit(dut, conn, cmd) <= 0)
 				return STATUS_SENT_ERROR;
 		} else {
@@ -15587,7 +15667,7 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	if (val) {
 		int chwidth;
 
-		switch (dut->ap_chwidth) {
+		switch (ap_chwidth) {
 		case AP_80:
 			chwidth = 80;
 			break;
@@ -15601,7 +15681,8 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 			return ERROR_SEND_STATUS;
 		}
 
-		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(dut, val);
+		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(dut, val,
+								    mlo_band);
 		if (dut->ap_punct_bitmap < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,Invalid punct bitmap");
