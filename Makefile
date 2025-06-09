@@ -85,7 +85,7 @@ LIBS += -ldl
 endif
 
 ifdef NL80211_SUPPORT
-CFLAGS += -DNL80211_SUPPORT -I /usr/include/libnl3
+CFLAGS += -DNL80211_SUPPORT
 LIBS += -lnl-3 -lnl-genl-3
 endif
 
