@@ -1270,7 +1270,7 @@ static enum sigma_cmd_result cmd_sta_get_ip_config(struct sigma_dut *dut,
 }
 
 
-static void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
+void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
 {
 #ifdef __linux__
 	char buf[200];
@@ -1344,7 +1344,7 @@ static int get_dhcp_client_path(const char *name, char *buf, size_t buf_size)
 }
 
 
-static int start_dhcp_client(struct sigma_dut *dut, const char *ifname)
+int start_dhcp_client(struct sigma_dut *dut, const char *ifname)
 {
 #ifdef __linux__
 	char fpath[128];
@@ -5688,7 +5688,7 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 			if (strcasecmp(multi_link, "Enable") == 0)
 				sta_config_params(dut, intf,
 						  STA_SET_EHT_MLO_MAX_NUM_LINKS,
-						  2);
+						  0);
 			else
 				sta_config_params(dut, intf,
 						  STA_SET_EHT_MLO_MAX_NUM_LINKS,
@@ -5971,8 +5971,17 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 					sigma_dut_print(dut, DUT_MSG_ERROR,
 							"Failed to reset bssid_filter");
 					ret = ERROR_SEND_STATUS;
+					break;
 				}
 			}
+			if (((dut->program == PROGRAM_EHT ||
+			      dut->device_mode == MODE_11BE) &&
+			     get_driver_type(dut) == DRIVER_WCN) &&
+			    (!multi_link ||
+			     strcasecmp(multi_link, "Disable") == 0))
+				sta_config_params(dut, intf,
+						  STA_SET_EHT_MLO_MAX_NUM_LINKS,
+						  0);
 			break;
 		}
 	}
@@ -11102,7 +11111,7 @@ static void sta_reset_default_wcn(struct sigma_dut *dut, const char *intf,
 		sta_config_params(dut, intf,
 				  STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 0);
 		sta_config_params(dut, intf, STA_SET_EHT_EML_CAPABILITY, 0);
-		sta_config_params(dut, intf, STA_SET_EHT_MLO_MAX_NUM_LINKS, 1);
+		sta_config_params(dut, intf, STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 		sta_config_params(dut, intf, STA_SET_EHT_MLO_MODE,
 				  QCA_WLAN_EHT_MLSR);
 
@@ -11708,6 +11717,8 @@ static enum sigma_cmd_result cmd_sta_exec_action(struct sigma_dut *dut,
 		    (strcasecmp(method, "ADVERTISE") == 0 ||
 		     strcasecmp(method, "SEEK") == 0))
 			return usd_cmd_sta_exec_action(dut, conn, cmd);
+		else
+			return p2p_cmd_sta_exec_action(dut, conn, cmd);
 	}
 
 	if (program && strcasecmp(program, "Loc") == 0)
@@ -12338,6 +12349,10 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 	}
 
 	val = get_param(cmd, "TargetWakeTime");
+	if (val)
+		target_wake_time = atoi(val);
+
+	val = get_param(cmd, "TWTSPOffset");
 	if (val)
 		target_wake_time = atoi(val);
 
@@ -13468,7 +13483,7 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut, intf,
 				STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 1);
 			sta_config_params(dut, intf,
-					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 2);
+					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 			/* Configure STR Tx for testbed. The configuration
 			 * gets reset with disconnection.
 			 */
@@ -13481,7 +13496,7 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut, intf,
 				STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 0);
 			sta_config_params(dut, intf,
-					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 2);
+					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 		} else if (strcasecmp(val, "NSTR") == 0) {
 			sta_config_params(dut, intf, STA_SET_EHT_MLO_MODE,
 					  QCA_WLAN_EHT_NON_STR_MLMR);
@@ -13489,7 +13504,7 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut, intf,
 				STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 1);
 			sta_config_params(dut, intf,
-					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 2);
+					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 		} else {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Invalid MLO mode %s", val);
@@ -16698,10 +16713,25 @@ cmd_sta_send_frame_p2p_cur(struct sigma_dut *dut, struct sigma_conn *conn,
 			   const char *intf, struct sigma_cmd *cmd)
 {
 	const char *val;
+	const char *ifname;
 
 	val = get_param(cmd, "UsageMode");
-	if (val && atoi(val) == 4)
-		return sta_chan_switch_request(dut, conn, intf, cmd);
+	if (val) {
+		if (atoi(val) == 4)
+			return sta_chan_switch_request(dut, conn, intf, cmd);
+
+		if (atoi(val) == 3) {
+			ifname = get_p2p_group_ifname(dut, intf);
+			if (run_iwpriv(dut, ifname,
+				       "setUnitTestCmd 77 2 4 0x0016") < 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to run iwpriv");
+				return STATUS_SENT_ERROR;
+			}
+
+			return SUCCESS_SEND_STATUS;
+		}
+	}
 
 	return INVALID_SEND_STATUS;
 }
