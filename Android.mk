@@ -1,3 +1,4 @@
+ifeq ($(TARGET_BOARD_PLATFORM),monaco)
 OBJS=sigma_dut.c
 OBJS += utils.c
 OBJS += wpa_ctrl.c
@@ -115,3 +116,4 @@ LOCAL_MODULE := e_loop
 LOCAL_VENDOR_MODULE := true
 LOCAL_CFLAGS := -DWITHOUT_IFADDRS -Wno-sign-compare
 include $(BUILD_EXECUTABLE)
+endif
