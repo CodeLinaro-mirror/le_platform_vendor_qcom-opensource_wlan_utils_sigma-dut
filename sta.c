@@ -2759,6 +2759,14 @@ static enum sigma_cmd_result set_trust_root_system(struct sigma_dut *dut,
 {
 	char buf[200];
 
+	memset(buf, 0, sizeof(buf));
+#ifdef OPENWRT_BUILD
+	strlcpy(buf, "/etc/ssl/certs/ca-certificates.crt", sizeof(buf));
+	if (file_exists(buf)) {
+		if (set_network_quoted(ifname, id, "ca_cert", buf) < 0)
+			return ERROR_SEND_STATUS;
+	} else {
+#endif
 	snprintf(buf, sizeof(buf), "%s/certs", sigma_cert_path);
 	if (!file_exists(buf))
 		strlcpy(buf, "/system/etc/security/cacerts", sizeof(buf));
@@ -2776,6 +2784,9 @@ static enum sigma_cmd_result set_trust_root_system(struct sigma_dut *dut,
 
 	if (set_network_quoted(ifname, id, "ca_path", buf) < 0)
 		return ERROR_SEND_STATUS;
+#ifdef OPENWRT_BUILD
+	}
+#endif
 
 	return SUCCESS_SEND_STATUS;
 }
