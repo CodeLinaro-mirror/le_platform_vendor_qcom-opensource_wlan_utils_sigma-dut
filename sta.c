@@ -1270,7 +1270,7 @@ static enum sigma_cmd_result cmd_sta_get_ip_config(struct sigma_dut *dut,
 }
 
 
-static void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
+void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
 {
 #ifdef __linux__
 	char buf[200];
@@ -1344,7 +1344,7 @@ static int get_dhcp_client_path(const char *name, char *buf, size_t buf_size)
 }
 
 
-static int start_dhcp_client(struct sigma_dut *dut, const char *ifname)
+int start_dhcp_client(struct sigma_dut *dut, const char *ifname)
 {
 #ifdef __linux__
 	char fpath[128];
@@ -3017,6 +3017,7 @@ static enum sigma_cmd_result cmd_sta_set_eaptls(struct sigma_dut *dut,
 	int jb_or_newer = 0;
 	char prop[PROPERTY_VALUE_MAX];
 #endif /* ANDROID */
+	bool is_suiteb = false;
 
 	if (intf == NULL)
 		return -1;
@@ -3107,6 +3108,7 @@ static enum sigma_cmd_result cmd_sta_set_eaptls(struct sigma_dut *dut,
 
 	val = get_param(cmd, "keyMgmtType");
 	if (val && strcasecmp(val, "SuiteB") == 0) {
+		is_suiteb = true;
 		val = get_param(cmd, "CertType");
 		if (val && strcasecmp(val, "RSA") == 0) {
 			if (set_network_quoted(ifname, id, "phase1",
@@ -3133,6 +3135,12 @@ static enum sigma_cmd_result cmd_sta_set_eaptls(struct sigma_dut *dut,
 		sigma_dut_print(dut, DUT_MSG_INFO, "Enable only TLS v1.3");
 		if (set_network_quoted(ifname, id, "phase1",
 				       "tls_disable_tlsv1_0=1 tls_disable_tlsv1_1=1 tls_disable_tlsv1_2=1 tls_disable_tlsv1_3=0") < 0)
+			return ERROR_SEND_STATUS;
+	} else if (!is_suiteb) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Enable TLS v1.0/v1.1/v1.2 (override system defaults)");
+		if (set_network_quoted(ifname, id, "phase1",
+				       "tls_disable_tlsv1_0=0 tls_disable_tlsv1_1=0 tls_disable_tlsv1_2=0") < 0)
 			return ERROR_SEND_STATUS;
 	}
 
@@ -4542,6 +4550,11 @@ enum qca_sta_helper_config_params {
 	/* For the attribute
 	 * QCA_WLAN_VENDOR_ATTR_CONFIG_FOLLOW_AP_PREFERENCE_FOR_CNDS_SELECT */
 	STA_SET_AP_PREF_FOR_CNDS_SEL,
+
+	/* For the attribute
+	 * QCA_WLAN_VENDOR_ATTR_CONFIG_SETUP_LINK_RECONFIG_SUPPORT
+	 */
+	STA_SET_LINK_RECONFIG_SUPPORT,
 };
 
 
@@ -4688,6 +4701,12 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 	case STA_SET_AP_PREF_FOR_CNDS_SEL:
 		if (nla_put_u8(msg,
 			       QCA_WLAN_VENDOR_ATTR_CONFIG_FOLLOW_AP_PREFERENCE_FOR_CNDS_SELECT,
+			       value))
+			goto fail;
+		break;
+	case STA_SET_LINK_RECONFIG_SUPPORT:
+		if (nla_put_u8(msg,
+			       QCA_WLAN_VENDOR_ATTR_CONFIG_SETUP_LINK_RECONFIG_SUPPORT,
 			       value))
 			goto fail;
 		break;
@@ -5642,6 +5661,7 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 	const char *wps_param = get_param(cmd, "WPS");
 	const char *bssid = get_param(cmd, "bssid");
 	const char *ap_link_mac = get_param(cmd, "AP_Link_MAC");
+	const char *secondary_links = get_param(cmd, "Secondary_AP_Link_MAC");
 	const char *chan = get_param(cmd, "channel");
 	const char *multi_link = get_param(cmd, "MultiLink");
 	const char *network_mode = get_param(cmd, "network_mode");
@@ -5668,7 +5688,7 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 			if (strcasecmp(multi_link, "Enable") == 0)
 				sta_config_params(dut, intf,
 						  STA_SET_EHT_MLO_MAX_NUM_LINKS,
-						  2);
+						  0);
 			else
 				sta_config_params(dut, intf,
 						  STA_SET_EHT_MLO_MAX_NUM_LINKS,
@@ -5754,13 +5774,25 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 			send_resp(dut, conn, SIGMA_ERROR, "ErrorCode,"
 				  "Invalid bssid argument");
 			return 0;
-		} else if (ap_link_mac &&
-			   set_network(get_station_ifname(dut),
-				       dut->infra_network_id,
-				       "bssid", ap_link_mac) < 0) {
-			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,Invalid bssid argument");
-			return 0;
+		} else if (ap_link_mac) {
+			if (set_network(get_station_ifname(dut),
+					dut->infra_network_id,
+					"bssid", ap_link_mac) < 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Invalid bssid argument");
+				return STATUS_SENT_ERROR;
+			}
+			if (secondary_links) {
+				snprintf(buf, sizeof(buf),
+					 "SET bssid_filter %s %s",
+					 ap_link_mac, secondary_links);
+				if (wpa_command(get_station_ifname(dut), buf) <
+				    0) {
+					send_resp(dut, conn, SIGMA_ERROR,
+						  "ErrorCode,Failed to set secondary links");
+					return STATUS_SENT_ERROR;
+				}
+			}
 		}
 
 		if ((dut->program == PROGRAM_WPA3 &&
@@ -5928,7 +5960,28 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 				sigma_dut_print(dut, DUT_MSG_ERROR,
 						"Failed to set bssid to any after connecting with AP link MAC");
 				ret = ERROR_SEND_STATUS;
+				break;
 			}
+			if (secondary_links) {
+				snprintf(buf, sizeof(buf),
+					 "SET bssid_filter %s",
+					 dut->sta_bssid_pool ?
+					 dut->sta_bssid_pool : "");
+				if (wpa_command(intf, buf) < 0) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to reset bssid_filter");
+					ret = ERROR_SEND_STATUS;
+					break;
+				}
+			}
+			if (((dut->program == PROGRAM_EHT ||
+			      dut->device_mode == MODE_11BE) &&
+			     get_driver_type(dut) == DRIVER_WCN) &&
+			    (!multi_link ||
+			     strcasecmp(multi_link, "Disable") == 0))
+				sta_config_params(dut, intf,
+						  STA_SET_EHT_MLO_MAX_NUM_LINKS,
+						  0);
 			break;
 		}
 	}
@@ -11058,7 +11111,7 @@ static void sta_reset_default_wcn(struct sigma_dut *dut, const char *intf,
 		sta_config_params(dut, intf,
 				  STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 0);
 		sta_config_params(dut, intf, STA_SET_EHT_EML_CAPABILITY, 0);
-		sta_config_params(dut, intf, STA_SET_EHT_MLO_MAX_NUM_LINKS, 1);
+		sta_config_params(dut, intf, STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 		sta_config_params(dut, intf, STA_SET_EHT_MLO_MODE,
 				  QCA_WLAN_EHT_MLSR);
 
@@ -11142,6 +11195,66 @@ static void kill_iperf(struct sigma_dut *dut)
 		}
 	}
 	closedir(dir);
+}
+
+
+static int sta_reset_btm_req_resp(struct sigma_dut *dut, const char *intf)
+{
+#ifdef NL80211_SUPPORT
+	struct nl_msg *msg;
+	struct nlattr *params, *attr;
+	int ifindex, ret;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Index for interface %s failed",
+				__func__, intf);
+		return -1;
+	}
+
+	if (!(msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+				    NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_WIFI_TEST_CONFIGURATION))
+		goto fail;
+
+	params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!params)
+		goto fail;
+
+	attr = nla_nest_start(msg,
+			      QCA_WLAN_VENDOR_ATTR_WIFI_TEST_CONFIG_BTM_REQ_RESP);
+
+	if (!attr)
+		goto fail;
+
+	if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_BTM_REQ_RESP_TYPE,
+		       QCA_WLAN_BTM_REQ_RESP_DEFAULT))
+		goto fail;
+
+	nla_nest_end(msg, attr);
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+	}
+
+	return ret;
+
+fail:
+	nlmsg_free(msg);
+	return -1;
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_INFO,
+			"Cannot configure BTM Request Response frame behavior without NL80211_SUPPORT defined");
+	return -1;
+#endif /* NL80211_SUPPORT */
 }
 
 
@@ -11374,6 +11487,7 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 		wpa_command(intf, "SET roaming 1");
 		wpa_command(intf, "SET interworking 1");
 		sta_config_params(dut, intf, STA_SET_AP_PREF_FOR_CNDS_SEL, 1);
+		sta_reset_btm_req_resp(dut, intf);
 	}
 
 	free(dut->rsne_override);
@@ -11603,6 +11717,8 @@ static enum sigma_cmd_result cmd_sta_exec_action(struct sigma_dut *dut,
 		    (strcasecmp(method, "ADVERTISE") == 0 ||
 		     strcasecmp(method, "SEEK") == 0))
 			return usd_cmd_sta_exec_action(dut, conn, cmd);
+		else
+			return p2p_cmd_sta_exec_action(dut, conn, cmd);
 	}
 
 	if (program && strcasecmp(program, "Loc") == 0)
@@ -12133,7 +12249,7 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 	struct nl_msg *msg;
 	int ifindex, ret;
 	const char *val;
-	const char *intf = get_param(cmd, "Interface");
+	const char *intf;
 	int wake_interval_exp = 10, nominal_min_wake_dur = 255,
 		wake_interval_mantissa = 512;
 	int flow_type = 0, twt_trigger = 0, target_wake_time = 0,
@@ -12169,6 +12285,7 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		return -1;
 	}
 
+	intf = get_param(cmd, "Interface");
 	ifindex = if_nametoindex(intf);
 	if (ifindex == 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -12232,6 +12349,10 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 	}
 
 	val = get_param(cmd, "TargetWakeTime");
+	if (val)
+		target_wake_time = atoi(val);
+
+	val = get_param(cmd, "TWTSPOffset");
 	if (val)
 		target_wake_time = atoi(val);
 
@@ -13362,7 +13483,7 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut, intf,
 				STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 1);
 			sta_config_params(dut, intf,
-					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 2);
+					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 			/* Configure STR Tx for testbed. The configuration
 			 * gets reset with disconnection.
 			 */
@@ -13375,7 +13496,7 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut, intf,
 				STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 0);
 			sta_config_params(dut, intf,
-					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 2);
+					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 		} else if (strcasecmp(val, "NSTR") == 0) {
 			sta_config_params(dut, intf, STA_SET_EHT_MLO_MODE,
 					  QCA_WLAN_EHT_NON_STR_MLMR);
@@ -13383,7 +13504,7 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 				dut, intf,
 				STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 1);
 			sta_config_params(dut, intf,
-					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 2);
+					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 0);
 		} else {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Invalid MLO mode %s", val);
@@ -13465,6 +13586,11 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "ExtraLTFSymbols");
 	if (val)
 		sta_set_eht_extra_eht_ltf(dut, intf, (u8) atoi(val));
+
+	val = get_param(cmd, "Link_Reconfig");
+	if (val)
+		sta_config_params(dut, intf, STA_SET_LINK_RECONFIG_SUPPORT,
+				  get_enable_disable(val) ? 1 : 0);
 
 	return cmd_sta_set_wireless_vht(dut, conn, cmd);
 }
@@ -16587,10 +16713,25 @@ cmd_sta_send_frame_p2p_cur(struct sigma_dut *dut, struct sigma_conn *conn,
 			   const char *intf, struct sigma_cmd *cmd)
 {
 	const char *val;
+	const char *ifname;
 
 	val = get_param(cmd, "UsageMode");
-	if (val && atoi(val) == 4)
-		return sta_chan_switch_request(dut, conn, intf, cmd);
+	if (val) {
+		if (atoi(val) == 4)
+			return sta_chan_switch_request(dut, conn, intf, cmd);
+
+		if (atoi(val) == 3) {
+			ifname = get_p2p_group_ifname(dut, intf);
+			if (run_iwpriv(dut, ifname,
+				       "setUnitTestCmd 77 2 4 0x0016") < 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to run iwpriv");
+				return STATUS_SENT_ERROR;
+			}
+
+			return SUCCESS_SEND_STATUS;
+		}
+	}
 
 	return INVALID_SEND_STATUS;
 }
@@ -17033,6 +17174,124 @@ static int tdls_set_offchannel_mode(struct sigma_dut *dut,
 	}
 
 	return 1;
+}
+
+
+static int sta_set_eht_mlo_link_reconfig(struct sigma_dut *dut,
+					 const char *intf,
+					 u16 add_links_bitmask,
+					 u16 delete_links_bitmask,
+					 u16 add_links_bitmask2,
+					 u16 delete_links_bitmask2)
+{
+#ifdef NL80211_SUPPORT
+	struct nl_msg *msg;
+	struct nlattr *params, *attr;
+	struct nlattr *nested_attr;
+	struct nlattr *frame_attr;
+	int ifindex, ret;
+	int i = 0;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Index for interface %s failed",
+				__func__, intf);
+		return -1;
+	}
+
+	if (!(msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0,
+				    NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_WIFI_TEST_CONFIGURATION))
+		goto fail;
+
+	params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!params)
+		goto fail;
+
+	attr = nla_nest_start(msg,
+			      QCA_WLAN_VENDOR_ATTR_WIFI_TEST_CONFIG_BTM_REQ_RESP);
+
+	if (!attr)
+		goto fail;
+
+	if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_BTM_REQ_RESP_TYPE,
+			QCA_WLAN_BTM_REQ_RESP_RECONFIG_FRAME))
+		goto fail;
+
+	nested_attr = nla_nest_start(msg,
+			QCA_WLAN_VENDOR_ATTR_BTM_REQ_RESP_RECONFIG_FRAME_INFO);
+
+	if (!nested_attr)
+		goto fail;
+
+	if (add_links_bitmask || delete_links_bitmask) {
+		frame_attr = nla_nest_start(msg, i +  1);
+		if (!frame_attr)
+			goto fail;
+
+
+		if (add_links_bitmask &&
+		    nla_put_u16(msg,
+				QCA_WLAN_VENDOR_ATTR_RECONFIG_ADD_LINKS_BITMASK,
+				add_links_bitmask))
+			goto fail;
+
+		if (delete_links_bitmask &&
+		    nla_put_u16(msg,
+				QCA_WLAN_VENDOR_ATTR_RECONFIG_DELETE_LINKS_BITMASK,
+				delete_links_bitmask))
+			goto fail;
+
+		nla_nest_end(msg, frame_attr);
+		i++;
+	}
+
+	if (add_links_bitmask2 || delete_links_bitmask2) {
+		frame_attr = nla_nest_start(msg, i +  1);
+		if (!frame_attr)
+			goto fail;
+
+		if (add_links_bitmask2 &&
+		    nla_put_u16(msg,
+				QCA_WLAN_VENDOR_ATTR_RECONFIG_ADD_LINKS_BITMASK,
+				add_links_bitmask2))
+			goto fail;
+
+		if (delete_links_bitmask2 &&
+		    nla_put_u16(msg,
+				QCA_WLAN_VENDOR_ATTR_RECONFIG_DELETE_LINKS_BITMASK,
+				delete_links_bitmask2))
+			goto fail;
+
+		nla_nest_end(msg, frame_attr);
+	}
+
+	nla_nest_end(msg, nested_attr);
+	nla_nest_end(msg, attr);
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+	}
+
+	return ret;
+
+fail:
+	nlmsg_free(msg);
+	return -1;
+
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_INFO,
+			"Ignore Link Reconfig request without NL80211_SUPPORT defined");
+	return -1;
+#endif /* NL80211_SUPPORT */
 }
 
 
@@ -17721,6 +17980,52 @@ wcn_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 		}
 		sta_config_params(dut, intf, STA_SET_EPCS_FUNCTION,
 				  epcs_function);
+	}
+
+	val = get_param(cmd, "BTMRequest_Response");
+	if (val && strcasecmp(val, "LinkReconfigReq") == 0) {
+		const char *param;
+		u16 add_links_bm = 0, delete_links_bm = 0;
+		u16 add_links_bm2 = 0, delete_links_bm2 = 0;
+
+		param = get_param(cmd, "ReconfigDeleteLinks");
+		if (param) {
+			delete_links_bm = get_link_id_bitmask(param);
+			if (!delete_links_bm)
+				return INVALID_SEND_STATUS;
+		}
+
+		param = get_param(cmd, "ReconfigAddLinks");
+		if (param) {
+			add_links_bm = get_link_id_bitmask(param);
+			if (!add_links_bm)
+				return INVALID_SEND_STATUS;
+		}
+
+		param = get_param(cmd, "SecondaryFrameReconfigDeleteLinks");
+		if (param) {
+			delete_links_bm2 = get_link_id_bitmask(param);
+			if (!delete_links_bm2)
+				return INVALID_SEND_STATUS;
+		}
+
+		param = get_param(cmd, "SecondaryFrameReconfigAddLinks");
+		if (param) {
+			add_links_bm2 = get_link_id_bitmask(param);
+			if (!add_links_bm2)
+				return INVALID_SEND_STATUS;
+		}
+
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"%s: add_link_bm=%u, delete_link_bm=%u, add_link_bm2=%u, delete_link_bm2=%u",
+				__func__, add_links_bm, delete_links_bm,
+				add_links_bm2, delete_links_bm2);
+
+		if (sta_set_eht_mlo_link_reconfig(dut, intf, add_links_bm,
+						  delete_links_bm,
+						  add_links_bm2,
+						  delete_links_bm2) < 0)
+			return ERROR_SEND_STATUS;
 	}
 
 	return SUCCESS_SEND_STATUS;
@@ -18473,6 +18778,8 @@ static enum sigma_cmd_result cmd_sta_bssid_pool(struct sigma_dut *dut,
 	bssid = get_param(cmd, "BSSID_List");
 	if (atoi(val) == 0 || bssid == NULL) {
 		/* Disable BSSID filter */
+		free(dut->sta_bssid_pool);
+		dut->sta_bssid_pool = NULL;
 		if (wpa_command(intf, "SET bssid_filter ")) {
 			send_resp(dut, conn, SIGMA_ERROR, "errorCode,Failed "
 				  "to disable BSSID filter");
@@ -18494,6 +18801,14 @@ static enum sigma_cmd_result cmd_sta_bssid_pool(struct sigma_dut *dut,
 		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Failed to enable "
 			  "BSSID filter");
 		return 0;
+	}
+
+	free(dut->sta_bssid_pool);
+	dut->sta_bssid_pool = strdup(bssid);
+	if (!dut->sta_bssid_pool) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Failed to cache BSSID filter");
+		return STATUS_SENT_ERROR;
 	}
 
 	return 1;
