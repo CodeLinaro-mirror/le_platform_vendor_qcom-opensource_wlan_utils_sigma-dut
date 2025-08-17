@@ -196,10 +196,11 @@ struct wil_wmi_p2p_cfg_cmd {
 #endif /* __linux__ */
 
 static int get_key_mgmt_capa(struct sigma_dut *dut);
+static int get_pairwise_ciphers_capa(struct sigma_dut *dut);
+static int get_group_ciphers_capa(struct sigma_dut *dut);
+static int get_group_mgmt_ciphers_capa(struct sigma_dut *dut);
 
 #ifdef ANDROID
-
-static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname);
 
 #define ANDROID_KEYSTORE_GET 'g'
 #define ANDROID_KEYSTORE_GET_PUBKEY 'b'
@@ -1411,69 +1412,6 @@ static int clear_ip_addr(struct sigma_dut *dut, const char *ifname)
 }
 
 
-#ifdef ANDROID
-static int add_ipv6_rule(struct sigma_dut *dut, const char *ifname)
-{
-	char cmd[200], *result, *pos;
-	FILE *fp;
-	int tableid;
-	size_t len, result_len = 1000;
-
-	snprintf(cmd, sizeof(cmd), "ip -6 route list table all | grep %s",
-		 ifname);
-	fp = popen(cmd, "r");
-	if (fp == NULL)
-		return -1;
-
-	result = malloc(result_len);
-	if (result == NULL) {
-		fclose(fp);
-		return -1;
-	}
-
-	len = fread(result, 1, result_len - 1, fp);
-	fclose(fp);
-
-	if (len == 0) {
-		free(result);
-		return -1;
-	}
-	result[len] = '\0';
-
-	pos = strstr(result, "table ");
-	if (pos == NULL) {
-		free(result);
-		return -1;
-	}
-
-	pos += strlen("table ");
-	tableid = atoi(pos);
-	if (tableid != 0) {
-		if (system("ip -6 rule del prio 22000") != 0) {
-			/* ignore any error */
-		}
-		snprintf(cmd, sizeof(cmd),
-			 "ip -6 rule add from all lookup %d prio 22000",
-			 tableid);
-		if (system(cmd) != 0) {
-			sigma_dut_print(dut, DUT_MSG_INFO,
-					"Failed to run %s", cmd);
-			free(result);
-			return -1;
-		}
-	} else {
-		sigma_dut_print(dut, DUT_MSG_INFO,
-				"No Valid Table Id found %s", pos);
-		free(result);
-		return -1;
-	}
-	free(result);
-
-	return 0;
-}
-#endif /* ANDROID */
-
-
 int set_ipv4_addr(struct sigma_dut *dut, const char *ifname,
 		  const char *ip, const char *mask)
 {
@@ -2079,7 +2017,9 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			  const char *ifname, struct sigma_cmd *cmd)
 {
 	const char *val;
-	int id;
+	char buf[500];
+	char *pos;
+	int id, rem, ret;
 	int cipher_set = 0;
 	int owe, sae;
 	int suite_b = 0;
@@ -2187,6 +2127,42 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		cipher_set = 1;
 		if (set_network(ifname, id, "pairwise", "GCMP-256 CCMP") < 0)
 			return -2;
+	} else if (dut->program == PROGRAM_WPA3) {
+		if (get_pairwise_ciphers_capa(dut) < 0)
+			return ERROR_SEND_STATUS;
+
+		cipher_set = 1;
+
+		pos = buf;
+		rem = sizeof(buf);
+
+		if (!(dut->pairwise_ciphers_capa & BIT(SIGMA_CIPHER_CCMP)))
+			return ERROR_SEND_STATUS;
+
+		ret = snprintf(pos, rem, "CCMP");
+		pos += ret;
+		rem -= ret;
+
+		if (dut->pairwise_ciphers_capa & BIT(SIGMA_CIPHER_GCMP)) {
+			ret = snprintf(pos, rem, " GCMP");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (dut->pairwise_ciphers_capa & BIT(SIGMA_CIPHER_GCMP_256)) {
+			ret = snprintf(pos, rem, " GCMP-256");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (dut->pairwise_ciphers_capa & BIT(SIGMA_CIPHER_CCMP_256)) {
+			ret = snprintf(pos, rem, " CCMP-256");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (set_network(ifname, id, "pairwise", buf) < 0)
+			return ERROR_SEND_STATUS;
 	}
 
 	if (!cipher_set && !owe) {
@@ -2227,6 +2203,40 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 	} else if (dut->device_mode == MODE_11BE || sae) {
 		if (set_network(ifname, id, "group", "GCMP-256 CCMP") < 0)
 			return -2;
+	} else if (dut->program == PROGRAM_WPA3) {
+		if (get_group_ciphers_capa(dut) < 0)
+			return ERROR_SEND_STATUS;
+
+		pos = buf;
+		rem = sizeof(buf);
+
+		if (!(dut->group_ciphers_capa & BIT(SIGMA_CIPHER_CCMP)))
+			return ERROR_SEND_STATUS;
+
+		ret = snprintf(pos, rem, "CCMP");
+		pos += ret;
+		rem -= ret;
+
+		if (dut->group_ciphers_capa & BIT(SIGMA_CIPHER_GCMP)) {
+			ret = snprintf(pos, rem, " GCMP");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (dut->group_ciphers_capa & BIT(SIGMA_CIPHER_GCMP_256)) {
+			ret = snprintf(pos, rem, " GCMP-256");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (dut->group_ciphers_capa & BIT(SIGMA_CIPHER_CCMP_256)) {
+			ret = snprintf(pos, rem, " CCMP-256");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (set_network(ifname, id, "group", buf) < 0)
+			return ERROR_SEND_STATUS;
 	}
 
 	val = get_param(cmd, "GroupMgntCipher");
@@ -2259,6 +2269,47 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Failed to set GroupMgntCipher");
 		return 0;
+	} else if (dut->program == PROGRAM_WPA3) {
+		if (get_group_mgmt_ciphers_capa(dut) < 0)
+			return ERROR_SEND_STATUS;
+
+		pos = buf;
+		rem = sizeof(buf);
+
+		if (!(dut->group_mgmt_ciphers_capa &
+		      BIT(SIGMA_CIPHER_AES_128_CMAC)))
+			return ERROR_SEND_STATUS;
+
+		ret = snprintf(pos, rem, "AES-128-CMAC");
+		pos += ret;
+		rem -= ret;
+
+		if (dut->group_mgmt_ciphers_capa &
+		    BIT(SIGMA_CIPHER_BIP_GMAC_128)) {
+			ret = snprintf(pos, rem, " BIP-GMAC-128");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (dut->group_mgmt_ciphers_capa &
+		    BIT(SIGMA_CIPHER_BIP_GMAC_256)) {
+			ret = snprintf(pos, rem, " BIP-GMAC-256");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (dut->group_mgmt_ciphers_capa &
+		    BIT(SIGMA_CIPHER_BIP_CMAC_256)) {
+			ret = snprintf(pos, rem, " BIP-CMAC-256");
+			pos += ret;
+			rem -= ret;
+		}
+
+		if (set_network(ifname, id, "group_mgmt", buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "errorCode,Failed to set GroupMgntCipher");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	val = get_param(cmd, "AKMSuiteType");
@@ -2267,7 +2318,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	dut->sta_pmf = STA_PMF_DISABLED;
 
-	if (dut->program == PROGRAM_OCE) {
+	if (dut->program == PROGRAM_OCE || dut->program == PROGRAM_WPA3) {
 		dut->sta_pmf = STA_PMF_OPTIONAL;
 		if (set_network(ifname, id, "ieee80211w", "1") < 0)
 			return -2;
@@ -14831,17 +14882,14 @@ static int sta_ap_known(const char *ifname, const char *bssid)
 }
 
 
-static int sta_scan_ap(struct sigma_dut *dut, const char *ifname,
-		       const char *bssid)
+static int sta_scan(struct sigma_dut *dut, const char *ifname)
 {
 	int res;
 	struct wpa_ctrl *ctrl;
 	char buf[256];
 
-	if (sta_ap_known(ifname, bssid))
-		return 0;
 	sigma_dut_print(dut, DUT_MSG_DEBUG,
-			"AP not in BSS table - start scan");
+			"start scan");
 
 	ctrl = open_wpa_mon(ifname);
 	if (ctrl == NULL) {
@@ -14867,6 +14915,21 @@ static int sta_scan_ap(struct sigma_dut *dut, const char *ifname,
 		sigma_dut_print(dut, DUT_MSG_INFO, "Scan did not complete");
 		return -1;
 	}
+
+	return 0;
+}
+
+
+static int sta_scan_ap(struct sigma_dut *dut, const char *ifname,
+		       const char *bssid)
+{
+	if (sta_ap_known(ifname, bssid))
+		return 0;
+	sigma_dut_print(dut, DUT_MSG_DEBUG,
+			"AP not in BSS table - start scan");
+
+	if (sta_scan(dut, ifname) < 0)
+		return -1;
 
 	if (sta_ap_known(ifname, bssid))
 		return 0;
@@ -16832,6 +16895,157 @@ cmd_sta_send_frame_p2p(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static enum sigma_cmd_result
+cmd_sta_send_frame_reconf(struct sigma_dut *dut, struct sigma_conn *conn,
+			  const char *intf, struct sigma_cmd *cmd)
+{
+	const char *param;
+	char buf[200];
+	char *pos;
+	int rem_len, ret, link_id;
+	u16 add_links_bm = 0, delete_links_bm = 0;
+	bool first_entry;
+
+	pos = buf;
+	rem_len = sizeof(buf);
+
+	ret = snprintf(pos, rem_len, "SETUP_LINK_RECONFIG");
+	if (snprintf_error(rem_len, ret)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to write Link Reconfiguration request command");
+		return ERROR_SEND_STATUS;
+	}
+
+	pos += ret;
+	rem_len -= ret;
+
+	if (get_param(cmd, "ReconfigAddLinks")) {
+		ret = snprintf(pos, rem_len, " add=");
+		if (snprintf_error(rem_len, ret)) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to write Link Reconfiguration request command");
+			return ERROR_SEND_STATUS;
+		}
+
+		pos += ret;
+		rem_len -= ret;
+
+		param = get_param(cmd, "ReconfigAddLinks");
+		add_links_bm = get_link_id_bitmask(param);
+		if (!add_links_bm)
+			return INVALID_SEND_STATUS;
+
+		first_entry = true;
+		for (link_id = 0; link_id < 15; link_id++) {
+			if (!(add_links_bm & BIT(link_id)))
+				continue;
+
+			if (first_entry) {
+				ret = snprintf(pos, rem_len, "%u", link_id);
+				if (snprintf_error(rem_len, ret)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to write Link Reconfiguration request command");
+					return ERROR_SEND_STATUS;
+				}
+
+				pos += ret;
+				rem_len -= ret;
+				first_entry = false;
+			} else {
+				ret = snprintf(pos, rem_len, " %u", link_id);
+				if (snprintf_error(rem_len, ret)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to write Link Reconfiguration request command");
+					return ERROR_SEND_STATUS;
+				}
+
+				pos += ret;
+				rem_len -= ret;
+			}
+		}
+	}
+
+	if (get_param(cmd, "ReconfigDeleteLinks")) {
+		ret = snprintf(pos, rem_len, " delete=");
+		if (snprintf_error(rem_len, ret)) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to write Link Reconfiguration request command");
+			return ERROR_SEND_STATUS;
+		}
+
+		pos += ret;
+		rem_len -= ret;
+
+		param = get_param(cmd, "ReconfigDeleteLinks");
+		delete_links_bm = get_link_id_bitmask(param);
+		if (!delete_links_bm)
+			return INVALID_SEND_STATUS;
+
+		first_entry = true;
+		for (link_id = 0; link_id < 15; link_id++) {
+			if (!(delete_links_bm & BIT(link_id)))
+				continue;
+
+			if (first_entry) {
+				ret = snprintf(pos, rem_len, "%u", link_id);
+				if (snprintf_error(rem_len, ret)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to write Link Reconfiguration request command");
+					return ERROR_SEND_STATUS;
+				}
+
+				pos += ret;
+				rem_len -= ret;
+				first_entry = false;
+			} else {
+				ret = snprintf(pos, rem_len, " %u", link_id);
+				if (snprintf_error(rem_len, ret)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to write Link Reconfiguration request command");
+					return ERROR_SEND_STATUS;
+				}
+
+				pos += ret;
+				rem_len -= ret;
+			}
+		}
+	}
+
+	if (sta_scan(dut, intf) < 0)
+		return ERROR_SEND_STATUS;
+
+	if (wpa_command(intf, buf) != 0) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,Failed to send link reconfiguration frame request");
+		return STATUS_SENT_ERROR;
+	}
+	sigma_dut_print(dut, DUT_MSG_DEBUG,
+			"Link reconfiguration frame request sent: %s", buf);
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result
+cmd_sta_send_frame_eht(struct sigma_dut *dut, struct sigma_conn *conn,
+		       const char *intf, struct sigma_cmd *cmd)
+{
+	const char *val;
+
+	val = get_param(cmd, "FrameName");
+	if (val) {
+		if (strcasecmp(val, "LinkReconfigReq") == 0)
+			return cmd_sta_send_frame_reconf(dut, conn, intf, cmd);
+
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: frame name - %s is invalid",
+				__func__, val);
+	}
+
+	return INVALID_SEND_STATUS;
+}
+
+
 enum sigma_cmd_result cmd_sta_send_frame(struct sigma_dut *dut,
 					 struct sigma_conn *conn,
 					 struct sigma_cmd *cmd)
@@ -16850,6 +17064,8 @@ enum sigma_cmd_result cmd_sta_send_frame(struct sigma_dut *dut,
 	val = get_param(cmd, "program");
 	if (val == NULL)
 		val = get_param(cmd, "frame");
+	if (val && strcasecmp(val, "EHT") == 0)
+		return cmd_sta_send_frame_eht(dut, conn, intf, cmd);
 	if (val && strcasecmp(val, "TDLS") == 0)
 		return cmd_sta_send_frame_tdls(dut, conn, cmd);
 	if (val && (strcasecmp(val, "HS2") == 0 ||
