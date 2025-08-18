@@ -1194,6 +1194,12 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 				dut->ap_mlo_links[AP_BAND_5GHz].configured = true;
 				dut->ap_interface_5g = 1;
 				mlo_config_band = AP_BAND_5GHz;
+				if (wlan_tag == 2) {
+					dut->ap_interface_6g = 1;
+					mlo_config_band = AP_BAND_6GHz;
+					dut->ap_mlo_links[AP_BAND_6GHz].configured = true;
+					dut->ap_mlo_links[AP_BAND_6GHz].treat_6GHz_as_5GHz= true;
+				}
 			} else if (strcasecmp(val, "6G") == 0) {
 				dut->ap_mlo_links[AP_BAND_6GHz].configured = true;
 				dut->ap_interface_6g = 1;
@@ -4290,11 +4296,11 @@ static void get_if_name(struct sigma_dut *dut, char *ifname_str,
 	ifname = get_hostapd_ifname(dut);
 	drv = get_driver_type(dut);
 
-	if (drv == DRIVER_OPENWRT && wlan_tag > 1) {
+	if (drv == DRIVER_OPENWRT && wlan_tag > 1 && dut->ap_mode != AP_11be) {
 		/* Handle tagged-ifname only on OPENWRT for now */
 		snprintf(ifname_str, str_size, "%s%d", ifname, wlan_tag - 1);
 	} else if ((drv == DRIVER_MAC80211 || drv == DRIVER_LINUX_WCN) &&
-		   wlan_tag == 2) {
+		   wlan_tag == 2 && dut->ap_mode != AP_11be) {
 		snprintf(ifname_str, str_size, "%s_1", ifname);
 	} else {
 		snprintf(ifname_str, str_size, "%s", ifname);
@@ -10065,6 +10071,8 @@ skip_key_mgmt:
 			chan = dut->ap_mlo_links[link_band].channel;
 			chwidth = dut->ap_mlo_links[link_band].chwidth;
 			band = link_band;
+			if (dut->ap_mlo_links[link_band].treat_6GHz_as_5GHz)
+				band = AP_BAND_5GHz;
 		} else {
 			chan = dut->ap_channel;
 			chwidth = dut->ap_chwidth;
@@ -11153,6 +11161,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	for (i = 0; i < AP_BAND_MAX; i++) {
 		dut->ap_mlo_links[i].configured = false;
 		dut->ap_mlo_links[i].dtim = 0;
+		dut->ap_mlo_links[i].treat_6GHz_as_5GHz= false;
 	}
 
 	drv = get_driver_type(dut);
@@ -12843,15 +12852,16 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 
 
 int ap_get_mlo_link_addr(struct sigma_dut *dut, const char *ifname,
-			 int link_band, char *link_addr)
+			 int link_band, char *link_addr, int tag)
 {
 	char buf[4096];
 	int freq;
 	int freq_band;
 
 	if (get_hapd_status(ifname, "freq", buf, sizeof(buf)) < 0) {
-		sigma_dut_print(dut, DUT_MSG_DEBUG, "%s: Failed to get link freq",
-				__func__);
+		sigma_dut_print(dut, DUT_MSG_DEBUG, "%s: Failed to get link freq %s %s",
+				__func__, ifname, sigma_hapd_ctrl ?
+				sigma_hapd_ctrl : "/var/run/hostapd");
 		return -1;
 	}
 
@@ -12863,7 +12873,7 @@ int ap_get_mlo_link_addr(struct sigma_dut *dut, const char *ifname,
 	else
 		freq_band = AP_BAND_5GHz;
 
-	if (link_band == freq_band) {
+	if (link_band == freq_band && tag == 1) {
 		if (get_hapd_status(ifname, "link_addr", buf, sizeof(buf)) < 0) {
 			sigma_dut_print(dut, DUT_MSG_DEBUG, "%s: Failed to get link addr",
 					__func__);
@@ -12925,7 +12935,7 @@ static enum sigma_cmd_result cmd_ap_get_mac_address(struct sigma_dut *dut,
 
 	/* Get link mac address for MLO case */
 	if (dut->ap_mode == AP_11be && link_band >= 0) {
-		if (ap_get_mlo_link_addr(dut, ifname, link_band, link_addr)) {
+		if (ap_get_mlo_link_addr(dut, ifname, link_band, link_addr, wlan_tag)) {
 			snprintf(resp, sizeof(resp),
 				 "errorCode,Could not get link addr");
 			send_resp(dut, conn, SIGMA_ERROR, resp);
