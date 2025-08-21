@@ -910,7 +910,6 @@ static int send_burst(struct sigma_stream *s)
 	return 0;
 }
 
-
 static void send_transaction(struct sigma_stream *s)
 {
 	char *pkt, *rpkt;
