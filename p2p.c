@@ -2388,6 +2388,9 @@ static enum sigma_cmd_result cmd_sta_get_p2p_ip_config(struct sigma_dut *dut,
 
 		convert_mac_addr_to_ipv6_lladdr(mac, ipv6_buf,
 						sizeof(ipv6_buf));
+#ifdef ANDROID
+		add_ipv6_rule(dut, grp->ifname);
+#endif /* ANDROID */
 		if (set_ipv6_addr(dut, ipv6_buf, "64", grp->ifname) != 0)
 			return -1;
 
@@ -4013,6 +4016,9 @@ p2p_pasn_join(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (!dut->p2p_event_mon_thread) {
 		/* Create a separate event thread to receive bootstrap request
 		 * event */
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"Starting P2P event monitoring thread");
+		stop_p2p_resp_event_rx = false;
 		pthread_create(&dut->p2p_event_mon_thread, NULL,
 			       &wpa_pairing_resp_event_recv, (void *) dut);
 	}
