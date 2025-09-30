@@ -1448,7 +1448,7 @@ static void enable_sta_ipv6_configuration(struct sigma_dut *dut,
 					      const char *ifname,
 					      char *buf, size_t buf_size)
 {
-#if defined(ANDROID)
+#if (defined(ANDROID) || (defined(__linux__) && !defined(LINUX_EMBEDDED)))
 	snprintf(buf, buf_size,
 		 "sysctl net.ipv6.conf.%s.disable_ipv6=1",
 		 ifname);
@@ -1527,6 +1527,14 @@ static enum sigma_cmd_result cmd_sta_set_ip_config(struct sigma_dut *dut,
 
 			enable_sta_ipv6_configuration(dut, ifname, buf,
 						      sizeof(buf));
+			snprintf(buf, sizeof(buf),
+				 "sysctl net.ipv6.conf.%s.autoconf=1",
+				 ifname);
+			sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+			if (system(buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_DEBUG,
+						"Failed to enable stateless address configuration");
+			}
 #ifdef ANDROID
 			/*
 			 * This sleep is required as the assignment in case of
@@ -1584,6 +1592,16 @@ static enum sigma_cmd_result cmd_sta_set_ip_config(struct sigma_dut *dut,
 						"Failed to disable IPv6 address before association");
 			}
 		} else {
+			enable_sta_ipv6_configuration(dut, ifname, buf,
+						      sizeof(buf));
+			snprintf(buf, sizeof(buf),
+				 "sysctl net.ipv6.conf.%s.autoconf=0",
+				 ifname);
+			sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
+			if (system(buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_DEBUG,
+						"Failed to disable stateless address configuration");
+			}
 			if (set_ipv6_addr(dut, ip, mask, ifname) != 0) {
 				send_resp(dut, conn, SIGMA_ERROR,
 					  "ErrorCode,Failed to set IPv6 address");
@@ -1982,6 +2000,9 @@ static int set_akm_suites(struct sigma_dut *dut, const char *ifname,
 			break;
 		case AKM_FT_FILS_SHA384:
 			str = "FT-FILS-SHA384";
+			break;
+		case AKM_OWE:
+			str = "OWE";
 			break;
 		case AKM_SAE_EXT_KEY:
 			str = "SAE-EXT-KEY";
@@ -2809,6 +2830,15 @@ static enum sigma_cmd_result set_trust_root_system(struct sigma_dut *dut,
 						   const char *ifname, int id)
 {
 	char buf[200];
+#ifdef OPENWRT_BUILD
+	const char *ca_bundle = "/etc/ssl/certs/ca-certificates.crt";
+
+	if (file_exists(ca_bundle)) {
+		if (set_network_quoted(ifname, id, "ca_cert", ca_bundle) < 0)
+			return ERROR_SEND_STATUS;
+		return SUCCESS_SEND_STATUS;
+	}
+#endif /* OPENWRT_BUILD */
 
 	snprintf(buf, sizeof(buf), "%s/certs", sigma_cert_path);
 	if (!file_exists(buf))
@@ -7328,6 +7358,22 @@ static void sta_set_phymode(struct sigma_dut *dut, const char *intf,
 }
 
 
+static int sta_set_eht_scs_traffic_supp(struct sigma_dut *dut, const char *intf,
+					int val)
+{
+#ifdef NL80211_SUPPORT
+	return wcn_wifi_test_config_set_u8(
+		dut, intf,
+		QCA_WLAN_VENDOR_ATTR_WIFI_TEST_CONFIG_EHT_SCS_TRAFFIC_SUPPORT,
+		val);
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"EHT SCS support cannot be changed without NL80211_SUPPORT defined");
+	return -1;
+#endif /* NL80211_SUPPORT */
+}
+
+
 #ifdef NL80211_SUPPORT
 static int wcn_sta_set_rsne_random_pmkid_cnt(struct sigma_dut *dut,
 					     const char *intf, uint8_t cnt)
@@ -7539,6 +7585,19 @@ cmd_sta_preset_testparameters(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (dut->program == PROGRAM_QM &&
 		    dut->device_mode == MODE_11AX)
 			sta_set_phymode(dut, intf, val);
+	}
+
+	val = get_param(cmd, "EHTSCS_TrafficSupport");
+	if (val) {
+		if (get_enable_disable(val)) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Enable EHTSCS_TrafficSupp");
+			sta_set_eht_scs_traffic_supp(dut, intf, 1);
+		} else {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Disable EHTSCS_TrafficSupp");
+			sta_set_eht_scs_traffic_supp(dut, intf, 0);
+		}
 	}
 
 	val = get_param(cmd, "wmm");
@@ -10187,6 +10246,22 @@ static int sta_set_eht_om_ctrl_supp(struct sigma_dut *dut, const char *intf,
 }
 
 
+static int sta_set_eht_btm_recomm_multi_ap_supp(struct sigma_dut *dut,
+						const char *intf, int val)
+{
+#ifdef NL80211_SUPPORT
+	return wcn_wifi_test_config_set_u8(
+		dut, intf,
+		QCA_WLAN_VENDOR_ATTR_WIFI_TEST_CONFIG_EHT_BTM_RECOMM_MULTI_AP_SUPPORT,
+		val);
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"EHT BTM recommended multi AP cannot be changed without NL80211_SUPPORT defined");
+	return -1;
+#endif /* NL80211_SUPPORT */
+}
+
+
 static int sta_set_eht_triggered_su_bforming_feedback(struct sigma_dut *dut,
 						      const char *intf, u8 val)
 {
@@ -10298,6 +10373,22 @@ static int sta_set_bcast_twt_support(struct sigma_dut *dut, const char *intf,
 #else /* NL80211_SUPPORT */
 	sigma_dut_print(dut, DUT_MSG_ERROR,
 			"BCAST TWT cannot be changed without NL80211_SUPPORT defined");
+	return -1;
+#endif /* NL80211_SUPPORT */
+}
+
+
+static int sta_set_rtwt_support(struct sigma_dut *dut, const char *intf,
+				int enable)
+{
+#ifdef NL80211_SUPPORT
+	return wcn_wifi_test_config_set_u8(
+		dut, intf,
+		QCA_WLAN_VENDOR_ATTR_WIFI_TEST_CONFIG_EHT_RTWT_SUPPORT,
+		enable);
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"RTWT cannot be changed without NL80211_SUPPORT defined");
 	return -1;
 #endif /* NL80211_SUPPORT */
 }
@@ -11231,6 +11322,7 @@ static void sta_reset_default_wcn(struct sigma_dut *dut, const char *intf,
 
 		if (type && strcasecmp(type, "Testbed") == 0) {
 			sta_set_eht_testbed_def(dut, intf, 1);
+			sta_set_eht_extra_eht_ltf(dut, intf, 0);
 #ifdef NL80211_SUPPORT
 			ret = sta_set_he_mcs(dut, intf, HE_80_MCS0_9);
 			if (ret) {
@@ -13400,6 +13492,14 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 		}
 	}
 
+	val = get_param(cmd, "RestrictedTWT");
+	if (val) {
+		if (get_enable_disable(val))
+			sta_set_rtwt_support(dut, intf, 1);
+		else
+			sta_set_rtwt_support(dut, intf, 0);
+	}
+
 	val = get_param(cmd, "PreamblePunctRx");
 	if (val && get_driver_type(dut) == DRIVER_WCN) {
 		int set_val;
@@ -13718,6 +13818,14 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 	if (val)
 		sta_config_params(dut, intf, STA_SET_LINK_RECONFIG_SUPPORT,
 				  get_enable_disable(val) ? 1 : 0);
+
+	val = get_param(cmd, "BTMRecomm_MultiAPSupport");
+	if (val) {
+		if (get_enable_disable(val))
+			sta_set_eht_btm_recomm_multi_ap_supp(dut, intf, 1);
+		else
+			sta_set_eht_btm_recomm_multi_ap_supp(dut, intf, 0);
+	}
 
 	return cmd_sta_set_wireless_vht(dut, conn, cmd);
 }
@@ -14938,10 +15046,10 @@ static int sta_scan_ap(struct sigma_dut *dut, const char *ifname,
 }
 
 
-static int cmd_sta_send_frame_hs2_neighadv(struct sigma_dut *dut,
-					   struct sigma_conn *conn,
-					   struct sigma_cmd *cmd,
-					   const char *intf)
+static int cmd_sta_send_frame_neighadv(struct sigma_dut *dut,
+				       struct sigma_conn *conn,
+				       struct sigma_cmd *cmd,
+				       const char *intf)
 {
 	char buf[200];
 
@@ -14956,16 +15064,16 @@ static int cmd_sta_send_frame_hs2_neighadv(struct sigma_dut *dut,
 }
 
 
-static int cmd_sta_send_frame_hs2_neighsolreq(struct sigma_dut *dut,
-					      struct sigma_conn *conn,
-					      struct sigma_cmd *cmd,
-					      const char *intf)
+static int cmd_sta_send_frame_neighsolreq(struct sigma_dut *dut,
+					  struct sigma_conn *conn,
+					  struct sigma_cmd *cmd,
+					  const char *intf)
 {
 	char buf[200];
 	const char *ip = get_param(cmd, "SenderIP");
 
 	if (!ip)
-		return 0;
+		ip = "::";
 
 	snprintf(buf, sizeof(buf), "ndisc6 -nm %s %s -r 4", ip, intf);
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "Run: %s", buf);
@@ -14979,10 +15087,10 @@ static int cmd_sta_send_frame_hs2_neighsolreq(struct sigma_dut *dut,
 }
 
 
-static int cmd_sta_send_frame_hs2_arpprobe(struct sigma_dut *dut,
-					   struct sigma_conn *conn,
-					   struct sigma_cmd *cmd,
-					   const char *ifname)
+static int cmd_sta_send_frame_arpprobe(struct sigma_dut *dut,
+				       struct sigma_conn *conn,
+				       struct sigma_cmd *cmd,
+				       const char *ifname)
 {
 	char buf[200];
 	const char *ip = get_param(cmd, "SenderIP");
@@ -15003,10 +15111,10 @@ static int cmd_sta_send_frame_hs2_arpprobe(struct sigma_dut *dut,
 }
 
 
-static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
-					      struct sigma_conn *conn,
-					      struct sigma_cmd *cmd,
-					      const char *ifname)
+static int cmd_sta_send_frame_arpannounce(struct sigma_dut *dut,
+					  struct sigma_conn *conn,
+					  struct sigma_cmd *cmd,
+					  const char *ifname)
 {
 	char buf[200];
 	char ip[16];
@@ -15044,10 +15152,10 @@ static int cmd_sta_send_frame_hs2_arpannounce(struct sigma_dut *dut,
 }
 
 
-static int cmd_sta_send_frame_hs2_arpreply(struct sigma_dut *dut,
-					   struct sigma_conn *conn,
-					   struct sigma_cmd *cmd,
-					   const char *ifname)
+static int cmd_sta_send_frame_arpreply(struct sigma_dut *dut,
+				       struct sigma_conn *conn,
+				       struct sigma_cmd *cmd,
+				       const char *ifname)
 {
 	char buf[200], addr[20];
 	char dst[ETH_ALEN], src[ETH_ALEN];
@@ -15158,19 +15266,19 @@ static int cmd_sta_send_frame_hs2(struct sigma_dut *dut,
 		return -1;
 
 	if (strcasecmp(type, "NeighAdv") == 0)
-		return cmd_sta_send_frame_hs2_neighadv(dut, conn, cmd, intf);
+		return cmd_sta_send_frame_neighadv(dut, conn, cmd, intf);
 
 	if (strcasecmp(type, "NeighSolicitReq") == 0)
-		return cmd_sta_send_frame_hs2_neighsolreq(dut, conn, cmd, intf);
+		return cmd_sta_send_frame_neighsolreq(dut, conn, cmd, intf);
 
 	if (strcasecmp(type, "ARPProbe") == 0)
-		return cmd_sta_send_frame_hs2_arpprobe(dut, conn, cmd, intf);
+		return cmd_sta_send_frame_arpprobe(dut, conn, cmd, intf);
 
 	if (strcasecmp(type, "ARPAnnounce") == 0)
-		return cmd_sta_send_frame_hs2_arpannounce(dut, conn, cmd, intf);
+		return cmd_sta_send_frame_arpannounce(dut, conn, cmd, intf);
 
 	if (strcasecmp(type, "ARPReply") == 0)
-		return cmd_sta_send_frame_hs2_arpreply(dut, conn, cmd, intf);
+		return cmd_sta_send_frame_arpreply(dut, conn, cmd, intf);
 
 	if (strcasecmp(type, "DLS-request") == 0 ||
 	    strcasecmp(type, "DLSrequest") == 0)
@@ -17037,6 +17145,28 @@ cmd_sta_send_frame_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (strcasecmp(val, "LinkReconfigReq") == 0)
 			return cmd_sta_send_frame_reconf(dut, conn, intf, cmd);
 
+		if (strcasecmp(val, "ARPProbe") == 0)
+			return cmd_sta_send_frame_arpprobe(dut, conn, cmd,
+							   intf);
+
+		if (strcasecmp(val, "ARPAnnounce") == 0)
+			return cmd_sta_send_frame_arpannounce(dut, conn, cmd,
+							      intf);
+
+		if (strcasecmp(val, "ARPReply") == 0)
+			return cmd_sta_send_frame_arpreply(dut, conn, cmd,
+							   intf);
+
+		if (strcasecmp(val, "NeighSolicitReq") == 0)
+			return cmd_sta_send_frame_neighsolreq(dut, conn, cmd,
+							      intf);
+
+		if (strcasecmp(val, "NeighAdv") == 0)
+			return cmd_sta_send_frame_neighadv(dut, conn, cmd,
+							   intf);
+		if (strcasecmp(val, "SCSReq") == 0)
+			return cmd_sta_send_frame_scs(dut, conn, intf, cmd);
+
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"%s: frame name - %s is invalid",
 				__func__, val);
@@ -18057,6 +18187,10 @@ wcn_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 #endif /* NL80211_SUPPORT */
 	}
 
+	val = get_param(cmd, "ExtraLTFSymbols");
+	if (val)
+		sta_set_eht_extra_eht_ltf(dut, intf, (u8) atoi(val));
+
 	val = get_param(cmd, "KeepAlive");
 	if (val) {
 		int set_val = QCA_WLAN_KEEP_ALIVE_DEFAULT;
@@ -18121,7 +18255,17 @@ wcn_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 					  "ErrorCode,TWT setup failed");
 				return STATUS_SENT_ERROR;
 			}
+			if (dut->device_type == STA_testbed &&
+			    run_iwpriv(dut, intf,
+				       "setUnitTestCmd 77 3 23 1 1") < 0)
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to set early wakeup");
 		} else if (strcasecmp(val, "Teardown") == 0) {
+			if (dut->device_type == STA_testbed &&
+			    run_iwpriv(dut, intf,
+				       "setUnitTestCmd 77 3 23 1 0") < 0)
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to reset early wakeup");
 			if (sta_twt_teardown(dut, conn, cmd)) {
 				send_resp(dut, conn, SIGMA_ERROR,
 					  "ErrorCode,TWT teardown failed");
