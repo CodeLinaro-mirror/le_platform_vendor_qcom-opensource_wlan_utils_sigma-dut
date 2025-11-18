@@ -218,8 +218,10 @@ enum sigma_cmd_result sigma_usd_subscribe(struct sigma_dut *dut,
 			freq = channel_to_freq(dut, chan);
 			res = snprintf(freq_list, sizeof(freq_list) - flen,
 				       "%d,", freq);
-			if (res < 0 || res >= sizeof(freq_list) - flen)
+			if (res < 0 || res >= sizeof(freq_list) - flen) {
+				free(ch_list);
 				return ERROR_SEND_STATUS;
+			}
 			flen += res;
 			token = strtok_r(NULL, " ", &saveptr);
 		}
