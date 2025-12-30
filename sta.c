@@ -6917,6 +6917,14 @@ static int mbo_set_cellular_data_capa(struct sigma_dut *dut,
 static int mbo_set_roaming(struct sigma_dut *dut, struct sigma_conn *conn,
 			   const char *intf, const char *val)
 {
+	/* mac80211 drivers rely on wpa_supplicant to manage roaming behavior.
+	 * Roaming is controlled via wpa_supplicant configuration. No additional
+	 * handling is required in sigma_dut. Therefore, simply return success
+	 * without issuing SET roaming commands.
+	 */
+	if (get_driver_type(dut) == DRIVER_MAC80211)
+		return 1;
+
 	if (strcasecmp(val, "Disable") == 0) {
 		if (wpa_command(intf, "SET roaming 0") < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
@@ -8661,6 +8669,27 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 			novap_reset(dut, intf, 1);
 			ath_config_dyn_bw_sig(dut, intf, val);
 			break;
+		case DRIVER_MAC80211:
+			if (strcasecmp(val, "enable") == 0) {
+				res = fwtest_cmd_wrapper(dut,
+							 "-t 2 -m 0x0 -p 1 0xa 1",
+							 intf);
+				if (res) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to enable dynamic BW signalling");
+					return ERROR_SEND_STATUS;
+				}
+			} else if (strcasecmp(val, "disable") == 0) {
+				res = fwtest_cmd_wrapper(dut,
+							 "-t 2 -m 0x0 -p 1 0xa 0",
+							 intf);
+				if (res) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to disable dynamic BW signalling");
+					return ERROR_SEND_STATUS;
+				}
+			}
+			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to set DYN_BW_SGNL");
@@ -8741,6 +8770,16 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 							set_val);
 					return ERROR_SEND_STATUS;
 				}
+			}
+		} else if (get_driver_type(dut) == DRIVER_MAC80211) {
+			if (set_val) {
+				fwtest_cmd_wrapper(dut,
+						   "-t 2 -m 0x0 -p 1 0xa 1",
+						   intf);
+			} else {
+				fwtest_cmd_wrapper(dut,
+						   "-t 2 -m 0x0 -p 1 0xa 0",
+						   intf);
 			}
 		} else {
 			run_iwpriv(dut, intf, "cwmenable %d", set_val);
@@ -13618,9 +13657,27 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 		else if (strcasecmp(val, "Disable") == 0)
 			set_val = 0;
 
-		if (sta_set_om_ctrl_supp(dut, intf, set_val)) {
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_om_ctrl_supp(dut, intf, set_val)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to set OM ctrl supp");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			/* For mac80211 drivers, there is no provision to
+			 * control HE OMI, OMControl is enabled by default.
+			 */
+			if (set_val == 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to disable OM ctrl supp");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,Failed to set OM ctrl supp");
+				  "ErrorCode,Setting OM ctrl not supported");
 			return STATUS_SENT_ERROR;
 		}
 	}
