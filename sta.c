@@ -1293,7 +1293,16 @@ void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
 		unlink(path);
 		sleep(1);
 	} else {
-		snprintf(path, sizeof(path), "/var/run/dhcpcd-%s.pid", ifname);
+		if (access("/var/run/dhcpcd", F_OK) == 0) {
+			snprintf(path, sizeof(path), "/var/run/dhcpcd/%s.pid",
+				 ifname);
+			if (access(path, F_OK) < 0)
+				snprintf(path, sizeof(path),
+					 "/var/run/dhcpcd/pid");
+		} else {
+			snprintf(path, sizeof(path), "/var/run/dhcpcd-%s.pid",
+				 ifname);
+		}
 
 		if (stat(path, &s) == 0) {
 			snprintf(buf, sizeof(buf), "kill `cat %s`", path);
@@ -12908,6 +12917,18 @@ static int sta_transmit_omi(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int
+mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
+				int buf_size)
+{
+	char buf[64];
+
+	snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x7e %d",
+		 buf_size == 256 ? 3 : 2);
+	return fwtest_cmd_wrapper(dut, buf, intf);
+}
+
+
 static enum sigma_cmd_result
 cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			 struct sigma_cmd *cmd)
@@ -13640,10 +13661,25 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			buf_size = 256;
 		else
 			buf_size = 64;
-		if (get_driver_type(dut) == DRIVER_WCN &&
-		    sta_set_addba_buf_size(dut, intf, buf_size)) {
+
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbaresp_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			if (mac80211_sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbaresp_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,set addbaresp_buff_size failed");
+				  "ErrorCode,does not support set addbaresp_buff_size");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -13662,10 +13698,25 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			buf_size = 256;
 		else
 			buf_size = 64;
-		if (get_driver_type(dut) == DRIVER_WCN &&
-		    sta_set_addba_buf_size(dut, intf, buf_size)) {
+
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbareq_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			if (mac80211_sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbareq_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,set addbareq_buff_size failed");
+				  "ErrorCode,does not support set addbareq_buff_size");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -13923,6 +13974,8 @@ sta_set_wireless_loc_r2(struct sigma_dut *dut, struct sigma_conn *conn,
 {
 	const char *i2rlmr_iftmr = get_param(cmd, "I2RLMRIFTMR");
 	const char *session_terminate = get_param(cmd, "FTMSessionTerminate");
+	const char *urnm_mfpr_x20 = get_param(cmd, "URNM_MFPR_X20");
+	const char *intf = get_param(cmd, "Interface");
 
 	if (i2rlmr_iftmr) {
 		dut->i2rlmr_iftmr = atoi(i2rlmr_iftmr);
@@ -13938,6 +13991,19 @@ sta_set_wireless_loc_r2(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (val)
 			dut->i2rlmrpolicy =
 				LOC_ABORT_ON_I2R_LMR_POLICY_MISMATCH;
+	}
+
+	if (urnm_mfpr_x20 && dut->device_type == STA_testbed) {
+		char buf[25];
+
+		dut->urnm_mfpr_x20 = strcasecmp(urnm_mfpr_x20, "Disable") != 0;
+		snprintf(buf, sizeof(buf), "SET urnm_mfpr_x20 %d",
+			 dut->urnm_mfpr_x20);
+		if (wpa_command(intf, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to set value urnm_mfpr_x20");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	return SUCCESS_SEND_STATUS;
@@ -16827,6 +16893,593 @@ cmd_sta_send_frame_dscp_response(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+#ifdef NL80211_SUPPORT
+static int
+parse_link_thresholds(struct sigma_dut *dut, struct nl_msg *msg,
+		      const char *val, uint16_t attr_id)
+{
+	char *res, *saveptr = NULL;
+	char *token;
+	u8 thresholds[MAX_NUM_MLO_LINKS] = { 0 };
+	int i = 0;
+
+	token = strdup(val);
+	if (!token)
+		return -1;
+
+	res = strtok_r(token, ";", &saveptr);
+	while (res && i < MAX_NUM_MLO_LINKS) {
+		thresholds[i] = (u8) atoi(res);
+		res = strtok_r(NULL, ";", &saveptr);
+		i++;
+	}
+
+	if (nla_put(msg, attr_id, i, thresholds)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Error in adding link threshold configuration i=%d",
+				__func__, i);
+		free(token);
+		return -1;
+	}
+
+	free(token);
+	return 0;
+}
+#endif /* NL80211_SUPPORT */
+
+
+#define DEFAULT_DAR_MEASUREMENT_DURATION   5000 /* value is in millisecond */
+#define DEFAULT_DAR_NUMBER_OF_MEASUREMENTS 100
+
+static enum sigma_cmd_result
+cmd_sta_send_frame_dar_request(struct sigma_dut *dut, struct sigma_conn *conn,
+			       const char *intf, struct sigma_cmd *cmd)
+{
+#ifdef NL80211_SUPPORT
+	struct nl_msg *msg;
+	int ret;
+	struct nlattr *dar_attr, *latency_attr, *radio_attr;
+	int ifindex;
+	const char *val;
+	u8 dar_stats_bitmap = 0;
+	u16 dar_measurement_duration = DEFAULT_DAR_MEASUREMENT_DURATION;
+	u16 dar_num_of_measurements = DEFAULT_DAR_NUMBER_OF_MEASUREMENTS;
+	u8 dar_request_type;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Could not find index for interface %s",
+				__func__, intf);
+		return ERROR_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "Request_Type");
+	if (val) {
+		if (strcasecmp(val, "add") == 0) {
+			dar_request_type = QCA_WLAN_DAR_OP_TYPE_REQUEST_ADD;
+		} else if (strcasecmp(val, "remove") == 0) {
+			dar_request_type = QCA_WLAN_DAR_OP_TYPE_REQUEST_REMOVE;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s: Invalid request_type", __func__);
+			return INVALID_SEND_STATUS;
+		}
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Request_type is mandatory", __func__);
+		return INVALID_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "DARMeasurementDuration");
+	if (val)
+		dar_measurement_duration = atoi(val);
+
+	val = get_param(cmd, "DARNumberOfMeasurements");
+	if (val)
+		dar_num_of_measurements = atoi(val);
+
+	val = get_param(cmd, "DARLatencyStats");
+	if (val && atoi(val) == 1)
+		dar_stats_bitmap |= QCA_WLAN_DAR_STATS_TYPE_LATENCY;
+
+	val = get_param(cmd, "DARRadioCounters");
+	if (val && atoi(val) == 1)
+		dar_stats_bitmap |= QCA_WLAN_DAR_STATS_TYPE_RADIO_COUNTERS;
+
+	val = get_param(cmd, "DARControlPlaneEventCount");
+	if (val && atoi(val))
+		dar_stats_bitmap |= QCA_WLAN_DAR_STATS_TYPE_CONTROL_PLANE;
+
+	msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0, NL80211_CMD_VENDOR);
+	if (!msg)
+		return ERROR_SEND_STATUS;
+
+	if (nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_DAR)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding DAR vendor_subcmd and vendor_id",
+				__func__);
+		goto error;
+	}
+
+	dar_attr = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!dar_attr ||
+	    nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_DAR_OP_TYPE,
+		       dar_request_type) ||
+	    nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_DAR_STATS_BITMAP,
+		       dar_stats_bitmap) ||
+	    nla_put_u16(msg, QCA_WLAN_VENDOR_ATTR_DAR_MEASUREMENT_DURATION,
+			dar_measurement_duration) ||
+	    nla_put_u16(msg, QCA_WLAN_VENDOR_ATTR_DAR_MEASUREMENTS,
+			dar_num_of_measurements)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding DAR vendor_cmd and vendor_data",
+				__func__);
+		goto error;
+	}
+
+	if (dar_stats_bitmap & QCA_WLAN_DAR_STATS_TYPE_LATENCY) {
+		u8 lat_link_granularity =
+			QCA_WLAN_DAR_LINK_GRANULARITY_DEVICE_LEVEL;
+
+		val = get_param(cmd, "DARLatLinkGranularity");
+		if (val) {
+			lat_link_granularity =
+				atoi(val) ?
+				QCA_WLAN_DAR_LINK_GRANULARITY_PER_LINK :
+				QCA_WLAN_DAR_LINK_GRANULARITY_DEVICE_LEVEL;
+		}
+		latency_attr =
+			nla_nest_start(msg,
+				       QCA_WLAN_VENDOR_ATTR_DAR_STATS_LATENCY_CONFIG);
+		if (!latency_attr ||
+		    nla_put_u8(msg, QCA_WLAN_DAR_STATS_LATENCY_ATTR_REPORT_TYPE,
+			       QCA_WLAN_DAR_LATENCY_REPORT_HISTOGRAM) ||
+		    nla_put_u8(msg,
+			       QCA_WLAN_DAR_STATS_LATENCY_ATTR_REPORT_GRANULARITY,
+			       QCA_WLAN_DAR_REPORT_GRANULARITY_TID) ||
+		    nla_put_u8(msg,
+			       QCA_WLAN_DAR_STATS_LATENCY_ATTR_LINK_GRANULARITY,
+			       lat_link_granularity)) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s: err in adding DAR vendor_cmd with latency configuration",
+					__func__);
+			goto error;
+		}
+
+		val = get_param(cmd, "DARLatStatsThreshold");
+		if (val) {
+			ret = parse_link_thresholds(dut, msg, val,
+						    QCA_WLAN_DAR_STATS_LATENCY_ATTR_THRESHOLDS);
+			if (ret < 0)
+				goto error;
+		}
+		nla_nest_end(msg, latency_attr);
+	}
+
+	if (dar_stats_bitmap & QCA_WLAN_DAR_STATS_TYPE_RADIO_COUNTERS) {
+		u16 radio_counter_fields_bitmap = 0;
+
+		radio_attr =
+			nla_nest_start(msg,
+				       QCA_WLAN_VENDOR_ATTR_DAR_RADIO_COUNTERS_CONFIG);
+		if (!radio_attr) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s: err in getting nested radio attr",
+					__func__);
+			goto error;
+		}
+
+		val = get_param(cmd, "DARRadioCountersReq");
+		if (val)
+			radio_counter_fields_bitmap = strtoul(val, NULL, 16);
+
+		if (nla_put_u16(msg,
+				QCA_WLAN_DAR_RADIO_COUNTERS_ATTR_PRESENCE_BITMAP,
+				radio_counter_fields_bitmap)) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s: err in adding radio counters presence bitmap",
+					__func__);
+			goto error;
+		}
+
+		if (radio_counter_fields_bitmap &
+		    QCA_WLAN_DAR_RADIO_COUNTERS_OBSERVED_CU_FRACTION_FIELD) {
+			struct nlattr *observed_cu_attr;
+
+			observed_cu_attr =
+				nla_nest_start(msg,
+					       QCA_WLAN_DAR_RADIO_COUNTERS_ATTR_OBSERVED_CU_FRACTIONAL);
+			if (!observed_cu_attr) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"%s: err in getting observed CU attr",
+						__func__);
+				goto error;
+			}
+
+			val = get_param(cmd,
+					"DARObservedChanUtilLinkGranularity");
+			if (val) {
+				u8 link_granularity = atoi(val);
+
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_OBSERVED_CU_FRACTIONAL_ATTR_LINK_GRANULARITY,
+					       link_granularity)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding Observed CU Link granularity configuration",
+							__func__);
+					goto error;
+				}
+			}
+
+			val = get_param(cmd, "DARObservedChanUtilThreshold");
+			if (val) {
+				ret = parse_link_thresholds(dut, msg, val,
+							    QCA_WLAN_DAR_OBSERVED_CU_FRACTIONAL_ATTR_THRESHOLDS);
+				if (ret < 0)
+					goto error;
+			}
+			nla_nest_end(msg, observed_cu_attr);
+		}
+
+		if (radio_counter_fields_bitmap &
+		    QCA_WLAN_DAR_RADIO_COUNTERS_MPDU_COUNT_STATISTICS_FIELD) {
+			struct nlattr *mpdu_attr;
+
+			mpdu_attr =
+				nla_nest_start(msg,
+					       QCA_WLAN_DAR_RADIO_COUNTERS_ATTR_MPDU_COUNT_STATS);
+			if (!mpdu_attr) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"%s: err in getting mpdu_attr",
+						__func__);
+				goto error;
+			}
+
+			val = get_param(cmd, "DARMPDUCountStatsRepGranularity");
+			if (val) {
+				u16 report_granularity = atoi(val);
+
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_MPDU_COUNT_STATS_ATTR_REPORT_GRANULARITY,
+					       report_granularity)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding mpdu_report_granularity",
+							__func__);
+					goto error;
+				}
+			}
+
+			val = get_param(cmd,
+					"DARMPDUCountStatsLinkGranularity");
+			if (val) {
+				u8 link_granularity = atoi(val);
+
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_MPDU_COUNT_STATS_ATTR_LINK_GRANULARITY,
+					       link_granularity)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding mpdu_link_granularity",
+							__func__);
+					goto error;
+				}
+			}
+
+			val = get_param(cmd, "DARMPDUCountStatsThreshold");
+			if (val) {
+				ret = parse_link_thresholds(dut, msg, val,
+							    QCA_WLAN_DAR_MPDU_COUNT_STATS_ATTR_THRESHOLDS);
+				if (ret < 0)
+					goto error;
+			}
+			nla_nest_end(msg, mpdu_attr);
+		}
+
+		if (radio_counter_fields_bitmap &
+		    QCA_WLAN_DAR_RADIO_COUNTERS_RTS_STATISTICS_FIELD) {
+			struct nlattr *rts_stats_attr;
+
+			rts_stats_attr =
+				nla_nest_start(msg,
+					       QCA_WLAN_DAR_RADIO_COUNTERS_ATTR_RTS_STATS);
+			if (!rts_stats_attr) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"%s: err in getting rts_stats_attr",
+						__func__);
+				goto error;
+			}
+
+			val = get_param(cmd, "DARRTSStatsLinkGranularity");
+			if (val) {
+				u8 rts_link_granularity = atoi(val);
+
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_RTS_STATS_ATTR_LINK_GRANULARITY,
+					       rts_link_granularity)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding rts_link_granularity",
+							__func__);
+					goto error;
+				}
+			}
+
+			val = get_param(cmd, "DARRTSStatsRepGranularity");
+			if (val) {
+				u8 rts_rep_granularity = atoi(val);
+
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_RTS_STATS_ATTR_REPORT_GRANULARITY,
+					       rts_rep_granularity)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding rts_rep_granularity",
+							__func__);
+					goto error;
+				}
+			}
+
+			val = get_param(cmd, "DARRTSStatsThreshold");
+			if (val) {
+				ret = parse_link_thresholds(dut, msg, val,
+							    QCA_WLAN_DAR_RTS_STATS_ATTR_THRESHOLDS);
+				if (ret < 0)
+					goto error;
+			}
+			nla_nest_end(msg, rts_stats_attr);
+		}
+
+		if (radio_counter_fields_bitmap &
+		    QCA_WLAN_DAR_RADIO_COUNTERS_FCS_FAILURE_FIELD) {
+			struct nlattr *fcs_attr;
+
+			fcs_attr =
+				nla_nest_start(msg,
+					       QCA_WLAN_DAR_RADIO_COUNTERS_ATTR_FCS_FAILURE);
+			if (!fcs_attr) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"%s: err in getting fcs_attr",
+						__func__);
+				goto error;
+			}
+
+			val = get_param(cmd, "DARFCSFailStatsLinkGranularity");
+			if (val) {
+				u8 fcs_link_granularity = atoi(val);
+
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_FCS_FAILURE_ATTR_LINK_GRANULARITY,
+					       fcs_link_granularity)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding fcs_link_granularity",
+							__func__);
+					goto error;
+				}
+			}
+			nla_nest_end(msg, fcs_attr);
+		}
+
+		nla_nest_end(msg, radio_attr);
+	}
+
+	if (dar_stats_bitmap & QCA_WLAN_DAR_STATS_TYPE_CONTROL_PLANE) {
+		u8 num_events = 0, i;
+		struct nlattr *ctrl_plane_attr;
+
+		ctrl_plane_attr =
+			nla_nest_start(msg,
+				       QCA_WLAN_VENDOR_ATTR_DAR_CONTROL_PLANE_EVENTS_CONFIG);
+		if (!ctrl_plane_attr) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s: err in getting control plane attr",
+					__func__);
+			goto error;
+		}
+
+		val = get_param(cmd, "DARControlPlaneEventCount");
+		if (val) {
+			num_events = atoi(val);
+			if (nla_put_u8(msg,
+				       QCA_WLAN_DAR_CONTROL_PLANE_EVENTS_ATTR_EVENT_COUNT,
+				       num_events)) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"%s: err in adding control plane events count",
+						__func__);
+				goto error;
+			}
+		}
+
+		val = get_param(cmd, "DARControlPlaneTupleCode");
+		if (val) {
+			char *saveptr = NULL;
+			char *tuple_token, *tuple_saveptr = NULL;
+			char *token = strdup(val);
+
+			if (!token) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"%s: err in adding category code",
+						__func__);
+				goto error;
+			}
+
+			tuple_token = strtok_r(token, ":", &tuple_saveptr);
+			for (i = 0; i < num_events; i++) {
+				struct nlattr *tuple_codes =
+							nla_nest_start(msg, i + 1);
+				u8 category, subcategory;
+				char *subcat_str;
+
+				if (!tuple_codes) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in getting tuple code",
+							__func__);
+					free(token);
+					goto error;
+				}
+
+				char *cat_str = strtok_r(tuple_token, "-", &saveptr);
+
+				if (!cat_str) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: missing category",
+							__func__);
+					free(token);
+					goto error;
+				}
+
+				subcat_str = strtok_r(NULL, "-", &saveptr);
+				if (!subcat_str) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: missing subcategory",
+							__func__);
+					free(token);
+					goto error;
+				}
+
+				category = (u8) atoi(cat_str);
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_TUPLE_CODES_ATTR_CATEGORY_CODE,
+					       category)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding category code",
+							__func__);
+					free(token);
+					goto error;
+				}
+
+				subcategory = (u8) atoi(subcat_str);
+				if (nla_put_u8(msg,
+					       QCA_WLAN_DAR_TUPLE_CODES_ATTR_SUBCATEGORY_CODE,
+					       subcategory)) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: err in adding subcategory code",
+							__func__);
+					free(token);
+					goto error;
+				}
+
+				nla_nest_end(msg, tuple_codes);
+
+				tuple_token = strtok_r(NULL, ":", &tuple_saveptr);
+				if (!tuple_token) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"%s: missing tuple token",
+							__func__);
+					free(token);
+					goto error;
+				}
+			}
+			free(token);
+		}
+		nla_nest_end(msg, ctrl_plane_attr);
+	}
+
+	nla_nest_end(msg, dar_attr);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+		return ERROR_SEND_STATUS;
+	}
+
+	return SUCCESS_SEND_STATUS;
+
+error:
+	nlmsg_free(msg);
+	return ERROR_SEND_STATUS;
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"DAR Request not supported without NL80211_SUPPORT defined");
+	return ERROR_SEND_STATUS;
+#endif /* NL80211_SUPPORT */
+}
+
+
+static enum sigma_cmd_result
+cmd_sta_send_frame_dar_response(struct sigma_dut *dut, struct sigma_conn *conn,
+				const char *intf, struct sigma_cmd *cmd)
+{
+#ifdef NL80211_SUPPORT
+	struct nl_msg *msg;
+	int ret;
+	struct nlattr *dar_attr;
+	int ifindex;
+	const char *val;
+	u8 dar_request_type;
+
+	ifindex = if_nametoindex(intf);
+	if (ifindex == 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Could not find index for interface %s",
+				__func__, intf);
+		return ERROR_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "Request_Type");
+	if (val) {
+		if (strcasecmp(val, "remove") == 0) {
+			dar_request_type = QCA_WLAN_DAR_OP_TYPE_RESPONSE_TERMINATE;
+		} else {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"%s: Invalid request_type", __func__);
+			return INVALID_SEND_STATUS;
+		}
+	} else {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: Request_type is mandatory", __func__);
+		return INVALID_SEND_STATUS;
+	}
+
+	msg = nl80211_drv_msg(dut, dut->nl_ctx, ifindex, 0, NL80211_CMD_VENDOR);
+	if (!msg) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in getting nlmsg", __func__);
+		return ERROR_SEND_STATUS;
+	}
+
+	if (nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_DAR)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding DAR vendor_subcmd and vendor_id",
+				__func__);
+		goto error;
+	}
+
+	dar_attr = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!dar_attr ||
+	    nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_DAR_OP_TYPE,
+		       dar_request_type)) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in adding DAR vendor_cmd and vendor_data",
+				__func__);
+		goto error;
+	}
+	nla_nest_end(msg, dar_attr);
+
+	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
+	if (ret) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"%s: err in send_and_recv_msgs, ret=%d",
+				__func__, ret);
+		return ERROR_SEND_STATUS;
+	}
+
+	return SUCCESS_SEND_STATUS;
+
+error:
+	nlmsg_free(msg);
+	return ERROR_SEND_STATUS;
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"DAR Response not supported without NL80211_SUPPORT defined");
+	return ERROR_SEND_STATUS;
+#endif /* NL80211_SUPPORT */
+}
+
+
 static enum sigma_cmd_result
 cmd_sta_send_frame_qm(struct sigma_dut *dut, struct sigma_conn *conn,
 		      const char *intf, struct sigma_cmd *cmd)
@@ -16845,6 +17498,12 @@ cmd_sta_send_frame_qm(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (strcasecmp(val, "DSCPPolicyResponse") == 0)
 			return cmd_sta_send_frame_dscp_response(dut, conn, intf,
 								cmd);
+		if (strcasecmp(val, "DARReq") == 0)
+			return cmd_sta_send_frame_dar_request(dut, conn, intf,
+							      cmd);
+		if (strcasecmp(val, "DARResp") == 0)
+			return cmd_sta_send_frame_dar_response(dut, conn, intf,
+							       cmd);
 
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"%s: frame name - %s is invalid",
@@ -18520,11 +19179,138 @@ failed:
 }
 
 
+static int mac80211_he_ltf_mapping(struct sigma_dut *dut,
+				   const char *val)
+{
+	if (strcmp(val, "3.2") == 0)
+		return 0;
+	if (strcmp(val, "6.4") == 0)
+		return 1;
+	if (strcmp(val, "12.8") == 0)
+		return 2;
+
+	sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported LTF value %s", val);
+	return -1;
+}
+
+
+static int mac80211_he_gi_mapping(struct sigma_dut *dut,
+				  const char *val)
+{
+	if (strcmp(val, "0.8") == 0)
+		return 9;
+	if (strcmp(val, "1.6") == 0)
+		return 10;
+	if (strcmp(val, "3.2") == 0)
+		return 11;
+
+	sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported GI value %s", val);
+	return -1;
+}
+
+
+static enum sigma_cmd_result mac80211_he_ltf(struct sigma_dut *dut,
+					     struct sigma_conn *conn,
+					     const char *intf,
+					     const char *val)
+{
+	free(dut->ar_ltf);
+	dut->ar_ltf = strdup(val);
+	if (!dut->ar_ltf) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Failed to store new LTF");
+		return STATUS_SENT_ERROR;
+	}
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
+					    const char *intf,
+					    const char *val)
+{
+	int16_t he_gi;
+	int ret = -1;
+	char buf[100];
+
+	he_gi = mac80211_he_gi_mapping(dut, val);
+	if (he_gi < 0)
+		return INVALID_SEND_STATUS;
+
+	if (dut->ar_ltf) {
+		int16_t he_ltf;
+		unsigned int value = 0;
+
+		he_ltf = mac80211_he_ltf_mapping(dut, dut->ar_ltf);
+		free(dut->ar_ltf);
+		dut->ar_ltf = NULL;
+
+		if (he_ltf < 0)
+			return ERROR_SEND_STATUS;
+
+		if (he_gi != 0xFF)
+			value |= 1 << he_gi;
+
+		if (he_ltf != 0xFF)
+			value |= 1 << he_ltf;
+
+		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d", value);
+		ret = fwtest_cmd_wrapper(dut, buf, intf);
+		if (ret < 0)
+			return ERROR_SEND_STATUS;
+
+		if (he_ltf != 0xFF) {
+			snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x74 %d",
+				 he_ltf + 1);
+			ret = fwtest_cmd_wrapper(dut, buf, intf);
+			if (ret < 0)
+				return ERROR_SEND_STATUS;
+		}
+	} else if (he_gi != 0xFF) {
+		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d",
+			 1 << he_gi);
+		ret = fwtest_cmd_wrapper(dut, buf, intf);
+	}
+
+	if (ret < 0)
+		return ERROR_SEND_STATUS;
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result
+mac80211_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
+			     struct sigma_conn *conn, struct sigma_cmd *cmd)
+{
+	const char *val;
+	enum sigma_cmd_result res;
+
+	val = get_param(cmd, "LTF");
+	if (val) {
+		res = mac80211_he_ltf(dut, conn, intf, val);
+		if (res != SUCCESS_SEND_STATUS)
+			return res;
+	}
+
+	val = get_param(cmd, "GI");
+	if (val || dut->ar_ltf) {
+		res = mac80211_he_gi(dut, intf, val);
+		if (res != SUCCESS_SEND_STATUS)
+			return res;
+	}
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
 static enum sigma_cmd_result
 cmd_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 			struct sigma_conn *conn, struct sigma_cmd *cmd)
 {
 	switch (get_driver_type(dut)) {
+	case DRIVER_MAC80211:
+		return mac80211_sta_set_rfeature_he(intf, dut, conn, cmd);
 	case DRIVER_WCN:
 		return wcn_sta_set_rfeature_he(intf, dut, conn, cmd);
 	default:
@@ -19104,11 +19890,26 @@ cmd_sta_set_rfeature_loc_r2(const char *intf, struct sigma_dut *dut,
 			    struct sigma_conn *conn, struct sigma_cmd *cmd)
 {
 	const char *rnm_mfp = get_param(cmd, "RNM_MFP");
+	const char *urnm_mfpr_x20 = get_param(cmd, "URNM_MFPR_X20");
 
 	if (rnm_mfp) {
 		dut->rnm_mfp = atoi(rnm_mfp);
 		sigma_dut_print(dut, DUT_MSG_INFO,
 				"rnm_mfp value is %d", dut->rnm_mfp);
+	}
+
+	if (urnm_mfpr_x20) {
+		char buf[100];
+
+		dut->urnm_mfpr_x20 = strcasecmp(urnm_mfpr_x20, "Disable") != 0;
+		snprintf(buf, sizeof(buf), "SET urnm_mfpr_x20 %d",
+			 dut->urnm_mfpr_x20);
+
+		if (wpa_command(intf, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to set urnm_mfpr_x20 flag");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	return SUCCESS_SEND_STATUS;
@@ -19223,6 +20024,14 @@ static enum sigma_cmd_result cmd_sta_set_pwrsave(struct sigma_dut *dut,
 			res = set_ps(intf, dut, 1);
 	} else if (get_driver_type(dut) == DRIVER_WCN) {
 		return cmd_sta_set_power_save_wcn(intf, dut, conn, cmd);
+	} else if (prog && get_driver_type(dut) == DRIVER_MAC80211 &&
+		   strcasecmp(prog, "HE") == 0) {
+		if (strcasecmp(powersave, "On") == 0)
+			res = set_ps(intf, dut, 1);
+		else if (strcasecmp(powersave, "Off") == 0)
+			res = set_ps(intf, dut, 0);
+		else
+			return -1;
 	} else {
 		if (mode == NULL)
 			return -1;
