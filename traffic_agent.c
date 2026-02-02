@@ -13,8 +13,8 @@
 #define TG_MAX_CLIENTS_CONNECTIONS 1
 
 /* Limited bit rate generator related constant or threshold values */
-  /* 25 Mbps per stream */
-#define WFA_SEND_FIX_BITRATE_MAX             25 * 1024 * 1024
+  /* 100 Mbps per stream */
+#define WFA_SEND_FIX_BITRATE_MAX             100 * 1024 * 1024
 
 /* To send periodic data for VO-Enterprise tests */
 extern int sigma_periodic_data;

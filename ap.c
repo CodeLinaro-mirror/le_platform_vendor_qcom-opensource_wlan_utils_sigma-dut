@@ -49,6 +49,10 @@
 #define SIGMA_DUT_HOSTAPD_PID_FILE "/tmp/sigma_dut-ap-hostapd.pid"
 #endif /* SIGMA_DUT_HOSTAPD_PID_FILE */
 
+/* Limits for random BSS color generation */
+#define BSS_COLOR_LOWER_LIMIT 1
+#define BSS_COLOR_UPPER_LIMIT 63
+
 /* The following is taken from Hotspot 2.0 testplan Appendix B.1 */
 #define ANQP_VENUE_NAME_1 "02019c0002083d656e6757692d466920416c6c69616e63650a3239383920436f7070657220526f61640a53616e746120436c6172612c2043412039353035312c205553415b63686957692d4669e88194e79b9fe5ae9ee9aa8ce5aea40ae4ba8ce4b99de585abe4b99de5b9b4e5ba93e69f8fe8b7af0ae59ca3e5858be68b89e68b892c20e58aa0e588a9e7a68fe5b0bce4ba9a39353035312c20e7be8ee59bbd"
 #define ANQP_VENUE_NAME_1_CHI "P\"\x63\x68\x69\x3a\x57\x69\x2d\x46\x69\xe8\x81\x94\xe7\x9b\x9f\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4\\n\xe4\xba\x8c\xe4\xb9\x9d\xe5\x85\xab\xe4\xb9\x9d\xe5\xb9\xb4\xe5\xba\x93\xe6\x9f\x8f\xe8\xb7\xaf\\n\xe5\x9c\xa3\xe5\x85\x8b\xe6\x8b\x89\xe6\x8b\x89\x2c\x20\xe5\x8a\xa0\xe5\x88\xa9\xe7\xa6\x8f\xe5\xb0\xbc\xe4\xba\x9a\x39\x35\x30\x35\x31\x2c\x20\xe7\xbe\x8e\xe5\x9b\xbd\""
@@ -126,8 +130,8 @@ static int get_oper_centr_freq_seq_idx(struct sigma_dut *dut, int chwidth,
 				       int channel);
 
 
-static int fwtest_cmd_wrapper(struct sigma_dut *dut, const char *arg,
-			       const char *ifname)
+int fwtest_cmd_wrapper(struct sigma_dut *dut, const char *arg,
+		       const char *ifname)
 {
 	int ret = -1;
 
@@ -880,6 +884,33 @@ static void get_he_mcs_nssmap(uint8_t *mcsnssmap, uint8_t nss,
 }
 
 
+static void ap_set_wireless_pr(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd)
+{
+	const char *val = get_param(cmd, "SecureLTFSupported");
+
+	if (val)
+		dut->secure_ltf_supported = get_enable_disable(val);
+
+	val = get_param(cmd, "PASN_UNAUTH");
+	if (val)
+		dut->ap_pasn_unauth = atoi(val);
+
+	val = get_param(cmd, "RNM_MFP");
+	if (val)
+		dut->rnm_mfp = atoi(val);
+
+	val = get_param(cmd, "URNM_MFPR_X20");
+	if (val)
+		dut->urnm_mfpr_x20 = strcasecmp(val, "Disable") != 0;
+
+	val = get_param(cmd, "I2RLMRFeedbackPolicy");
+	if (val)
+		dut->i2rlmrpolicy = atoi(val);
+
+}
+
+
 #ifdef NL80211_SUPPORT
 static int wcn_set_txbf_periodic_ndp(struct sigma_dut *dut, const char *intf,
 				     uint8_t cfg_val)
@@ -1033,6 +1064,9 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	val = get_param(cmd, "PROGRAM");
 	if (val)
 		dut->program = sigma_program_to_enum(val);
+
+	if (dut->program == PROGRAM_PR)
+		ap_set_wireless_pr(dut, conn, cmd);
 
 	val = get_param(cmd, "WLAN_TAG");
 	if (val) {
@@ -2900,6 +2934,16 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 			dut->ap_key_mgmt = AP_WPA2_ENT_FT_EAP;
 			dut->ap_cipher = AP_CCMP;
 			dut->ap_pmf = AP_PMF_OPTIONAL;
+		} else if (strcasecmp(val, "PASN") == 0) {
+			dut->ap_key_mgmt = AP_PASN;
+			dut->ap_cipher = AP_CCMP;
+			dut->ap_pasn = PASN_ENABLED;
+			dut->ap_pmf = AP_PMF_REQUIRED;
+		} else if (strcasecmp(val, "PASN-SAE") == 0) {
+			dut->ap_key_mgmt = AP_PASN_SAE;
+			dut->ap_cipher = AP_CCMP;
+			dut->ap_pasn = PASN_ENABLED;
+			dut->ap_pmf = AP_PMF_REQUIRED;
 		} else if (strcasecmp(val, "NONE") == 0) {
 			dut->ap_key_mgmt = AP_OPEN;
 			dut->ap_cipher = AP_PLAIN;
@@ -3239,13 +3283,13 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 	val = get_param(cmd, "Transition_Disable");
 	if (val) {
 		if (atoi(val)) {
+			/* Use WPA3-Personal Only by default for transition
+			 * disable index if no specific bit is identified. */
 			val = get_param(cmd, "Transition_Disable_Index");
-			if (!val) {
-				send_resp(dut, conn, SIGMA_INVALID,
-					  "errorCode,Transition_Disable without Transition_Disable_Index");
-				return STATUS_SENT;
-			}
-			dut->ap_transition_disable = 1 << atoi(val);
+			if (val)
+				dut->ap_transition_disable = 1 << atoi(val);
+			else
+				dut->ap_transition_disable = 1;
 			if (dut->ap_pmf == AP_PMF_DISABLED && !pmf_set)
 				dut->ap_pmf = AP_PMF_OPTIONAL;
 		} else {
@@ -4624,6 +4668,8 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 		case AP_WPA2_EAP_SHA256:
 		case AP_WPA2_PSK_SHA256:
 		case AP_WPA2_ENT_FT_EAP:
+		case AP_PASN:
+		case AP_PASN_SAE:
 			/* TODO */
 			break;
 		case AP_SUITEB:
@@ -5639,6 +5685,8 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 	case AP_WPA2_EAP_SHA256:
 	case AP_WPA2_PSK_SHA256:
 	case AP_WPA2_ENT_FT_EAP:
+	case AP_PASN:
+	case AP_PASN_SAE:
 	case AP_WPA3_SAE_EXT:
 		/* Not supported */
 		break;
@@ -7869,6 +7917,8 @@ static int cmd_ath_ap_config_commit(struct sigma_dut *dut,
 	case AP_WPA2_PSK_SHA256:
 	case AP_WPA2_ENT_FT_EAP:
 	case AP_OSEN:
+	case AP_PASN:
+	case AP_PASN_SAE:
 	case AP_WPA3_SAE_EXT:
 		/* TODO */
 		send_resp(dut, conn, SIGMA_ERROR,
@@ -7984,6 +8034,8 @@ static int cmd_ath_ap_config_commit(struct sigma_dut *dut,
 		case AP_WPA2_PSK_SHA256:
 		case AP_WPA2_ENT_FT_EAP:
 		case AP_OSEN:
+		case AP_PASN:
+		case AP_PASN_SAE:
 		case AP_WPA3_SAE_EXT:
 			/* TODO */
 			send_resp(dut, conn, SIGMA_ERROR,
@@ -8811,6 +8863,39 @@ static void set_second_ap_security_conf(FILE *file, struct sigma_dut *dut)
 }
 
 
+static int cipher_support(int ciphers_capa, enum ap_cipher cipher)
+{
+	if (!ciphers_capa)
+		return 1;
+
+	switch (cipher) {
+	case AP_WEP:
+		return !!(ciphers_capa & BIT(AP_WEP));
+	case AP_TKIP:
+		return !!(ciphers_capa & BIT(AP_TKIP));
+	case AP_CCMP:
+		return !!(ciphers_capa & BIT(AP_CCMP));
+	case AP_GCMP_128:
+		return !!(ciphers_capa & BIT(AP_GCMP_128));
+	case AP_GCMP_256:
+		return !!(ciphers_capa & BIT(AP_GCMP_256));
+	case AP_CCMP_256:
+		return !!(ciphers_capa & BIT(AP_CCMP_256));
+	case AP_CCMP_TKIP:
+		return !!((ciphers_capa & BIT(AP_CCMP)) &&
+			  (ciphers_capa & BIT(AP_TKIP)));
+	case AP_CCMP_128_GCMP_256:
+		return !!((ciphers_capa & BIT(AP_CCMP)) &&
+			  (ciphers_capa & BIT(AP_GCMP_256)));
+	case AP_PLAIN:
+		return 1;
+	case AP_NO_GROUP_CIPHER_SET:
+	default:
+		return 0;
+	}
+}
+
+
 enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 					   struct sigma_conn *conn,
 					   struct sigma_cmd *cmd)
@@ -8834,6 +8919,12 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 
 	drv = get_driver_type(dut);
 	mode = dut->ap_mode;
+
+	if (dut->ap_cipher == AP_WEP &&
+	    !cipher_support(dut->ciphers_capa, AP_WEP)) {
+		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Not supported");
+		return STATUS_SENT_ERROR;
+	}
 
 	if (dut->mode == SIGMA_MODE_STATION) {
 		stop_sta_mode(dut);
@@ -8963,14 +9054,28 @@ write_conf:
 	if (drv == DRIVER_MAC80211 || drv == DRIVER_LINUX_WCN)
 		fprintf(f, "driver=nl80211\n");
 
-	if (dut->ap_tx_stbc == VALUE_NOT_SET && drv == DRIVER_LINUX_WCN)
+	if (drv == DRIVER_MAC80211 && dut->program == PROGRAM_HE) {
+		u8 random_bss_color = 0;
+
+		random_get_bytes((char *) &random_bss_color,
+				 sizeof(random_bss_color));
+		random_bss_color =
+			(random_bss_color %
+			 (BSS_COLOR_UPPER_LIMIT - BSS_COLOR_LOWER_LIMIT + 1)) +
+			BSS_COLOR_LOWER_LIMIT;
+		fprintf(f, "he_bss_color=%d\n", random_bss_color);
+	}
+
+	if (dut->ap_tx_stbc == VALUE_NOT_SET &&
+	    (drv == DRIVER_LINUX_WCN || drv == DRIVER_MAC80211))
 		dut->ap_tx_stbc = get_driver_ap_tx_stbc_capab(dut);
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
 	    (mode == AP_11ng || mode == AP_11na ||
 	     ((mode == AP_11ax || mode == AP_11be) && !dut->use_5g))) {
-		int ht40plus = 0, ht40minus = 0, tx_stbc = 0;
+		int ht40plus = 0, ht40minus = 0, tx_stbc = 0, sgi_20 = 0,
+			sgi_40 = 0;
 
 		fprintf(f, "ieee80211n=1\n");
 		if (mode == AP_11ax || mode == AP_11be)
@@ -9014,10 +9119,19 @@ write_conf:
 			ht40plus = 0;
 		}
 
-		fprintf(f, "ht_capab=%s%s%s\n",
+		if (drv == DRIVER_MAC80211 && dut->ap_chwidth == AP_20) {
+			sgi_20 = 1;
+		} else if (drv == DRIVER_MAC80211 && dut->ap_chwidth == AP_40) {
+			sgi_20 = 1;
+			sgi_40 = 1;
+		}
+
+		fprintf(f, "ht_capab=%s%s%s%s%s\n",
 			ht40plus ? "[HT40+]" : "",
 			ht40minus ? "[HT40-]" : "",
-			tx_stbc ? "[TX-STBC]" : "");
+			tx_stbc ? "[TX-STBC]" : "",
+			sgi_20 ? "[SHORT-GI-20]" : "",
+			sgi_40 ? "[SHORT-GI-40]" : "");
 	}
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
@@ -9048,7 +9162,8 @@ write_conf:
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
-	    (mode == AP_11ac || mode == AP_11na)) {
+	    (mode == AP_11ac || mode == AP_11na ||
+	     (mode == AP_11ax && drv == DRIVER_MAC80211))) {
 		if (dut->ap_countrycode[0]) {
 			fprintf(f, "country_code=%s\n", dut->ap_countrycode);
 			fprintf(f, "ieee80211d=1\n");
@@ -9124,6 +9239,9 @@ write_conf:
 	if (dut->bridge)
 		fprintf(f, "bridge=%s\n", dut->bridge);
 
+	if (dut->ap_band_6g && drv == DRIVER_MAC80211)
+		fprintf(f, "unsol_bcast_probe_resp_interval=20\n");
+
 	if (dut->ap_is_dual && conf_counter == 1) {
 		if (dut->ap_channel_1)
 			fprintf(f, "channel=%d\n", dut->ap_channel_1);
@@ -9171,6 +9289,7 @@ write_conf:
 			{ AKM_FILS_SHA384, "FILS-SHA384" },
 			{ AKM_FT_FILS_SHA256, "FT-FILS-SHA256" },
 			{ AKM_FT_FILS_SHA384, "FT-FILS-SHA384" },
+			{ AKM_OWE, "OWE"},
 			{ AKM_SAE_EXT_KEY, "SAE-EXT-KEY" },
 			{ AKM_FT_SAE_EXT_KEY, "FT-SAE-EXT-KEY" },
 		};
@@ -9253,14 +9372,23 @@ write_conf:
 			fprintf(f, "wpa=3\n");
 		else
 			fprintf(f, "wpa=1\n");
-		if (dut->ap_key_mgmt == AP_WPA2_SAE)
-			key_mgmt = "SAE";
-		else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE)
-			key_mgmt = "WPA-PSK SAE";
-		else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT)
+		if (dut->ap_key_mgmt == AP_WPA2_SAE) {
+			if (dut->ap_pasn_unauth != -1 ||
+			    dut->secure_ltf_supported == 1)
+				key_mgmt = "SAE PASN";
+			else
+				key_mgmt = "SAE";
+		} else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE) {
+			if (dut->ap_pasn_unauth != -1 ||
+			    dut->secure_ltf_supported == 1)
+				key_mgmt = "WPA-PSK SAE PASN";
+			else
+				key_mgmt = "WPA-PSK SAE";
+		} else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT) {
 			key_mgmt = "SAE-EXT-KEY";
-		else
+		} else {
 			key_mgmt = "WPA-PSK";
+		}
 		switch (dut->ap_pmf) {
 		case AP_PMF_DISABLED:
 			fprintf(f, "wpa_key_mgmt=%s%s\n", key_mgmt,
@@ -9271,14 +9399,23 @@ write_conf:
 				dut->ap_add_sha256 ? " WPA-PSK-SHA256" : "");
 			break;
 		case AP_PMF_REQUIRED:
-			if (dut->ap_key_mgmt == AP_WPA2_SAE)
-				key_mgmt = "SAE";
-			else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE)
-				key_mgmt = "WPA-PSK-SHA256 SAE";
-			else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT)
+			if (dut->ap_key_mgmt == AP_WPA2_SAE) {
+				if (dut->ap_pasn_unauth != -1 ||
+				    dut->secure_ltf_supported == 1)
+					key_mgmt = "SAE PASN";
+				else
+					key_mgmt = "SAE";
+			} else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE) {
+				if (dut->ap_pasn_unauth != -1 ||
+				    dut->secure_ltf_supported == 1)
+					key_mgmt = "WPA-PSK-SHA256 SAE PASN";
+				else
+					key_mgmt = "WPA-PSK-SHA256 SAE";
+			} else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT) {
 				key_mgmt = "SAE-EXT-KEY";
-			else
+			} else {
 				key_mgmt = "WPA-PSK-SHA256";
+			}
 			fprintf(f, "wpa_key_mgmt=%s\n", key_mgmt);
 			break;
 		}
@@ -9380,6 +9517,22 @@ write_conf:
 				dut->ap_radius_port);
 		fprintf(f, "auth_server_shared_secret=%s\n",
 			dut->ap_radius_password);
+		break;
+	case AP_PASN:
+		fprintf(f, "wpa=2\n");
+		fprintf(f, "rsn_pairwise=CCMP\n");
+		fprintf(f, "wpa_key_mgmt=WPA-PSK SAE PASN\n");
+		fprintf(f, "sae_require_mfp=1\n");
+		fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
+		fprintf(f, "sae_pwe=%d\n", dut->sae_pwe);
+		break;
+	case AP_PASN_SAE:
+		fprintf(f, "wpa=2\n");
+		fprintf(f, "rsn_pairwise=CCMP\n");
+		fprintf(f, "wpa_key_mgmt=SAE PASN\n");
+		fprintf(f, "sae_require_mfp=1\n");
+		fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
+		fprintf(f, "sae_pwe=%d\n", dut->sae_pwe);
 		break;
 	case AP_WPA2_OWE:
 		fprintf(f, "wpa=2\n");
@@ -9527,6 +9680,8 @@ skip_key_mgmt:
 			fprintf(f, "sae_pwe=%s\n", sae_pwe);
 	}
 
+	if (dut->i2rlmrpolicy != 0)
+		fprintf(f, "i2r_lmr_policy=%u\n", dut->i2rlmrpolicy);
 	if (dut->sae_anti_clogging_threshold >= 0)
 		fprintf(f, "sae_anti_clogging_threshold=%d\n",
 			dut->sae_anti_clogging_threshold);
@@ -9971,6 +10126,12 @@ skip_vht_parameters_set:
 		fprintf(f, "oce=%d\n",
 			dut->dev_role == DEVROLE_STA_CFON ? 2 : 1);
 	}
+	if (dut->program == PROGRAM_PR) {
+		if (dut->ap_pasn_unauth != -1)
+			fprintf(f, "pasn_noauth=%d\n", dut->ap_pasn_unauth);
+		fprintf(f, "urnm_mfpr_x20=%d\n", dut->urnm_mfpr_x20);
+		fprintf(f, "urnm_mfpr=%d\n", dut->rnm_mfp);
+	}
 	fclose(f);
 
 	if (dut->ap_is_dual && conf_counter == 0) {
@@ -10116,7 +10277,7 @@ skip_vht_parameters_set:
 				"setting addba buf_size=%d", buf_size);
 	}
 
-	if (drv == DRIVER_LINUX_WCN) {
+	if (drv == DRIVER_LINUX_WCN || drv == DRIVER_MAC80211) {
 		const char *ifname_ptr = ifname;
 
 		if ((dut->ap_key_mgmt == AP_OPEN &&
@@ -10494,6 +10655,44 @@ static void ath_reset_vht_defaults(struct sigma_dut *dut)
 
 #ifdef NL80211_SUPPORT
 
+#define SUITE(oui, id)  (((oui) << 8) | (id))
+
+/* cipher suite selectors */
+#define WLAN_CIPHER_SUITE_WEP40         SUITE(0x000FAC, 1)
+#define WLAN_CIPHER_SUITE_TKIP          SUITE(0x000FAC, 2)
+#define WLAN_CIPHER_SUITE_CCMP          SUITE(0x000FAC, 4)
+#define WLAN_CIPHER_SUITE_WEP104        SUITE(0x000FAC, 5)
+#define WLAN_CIPHER_SUITE_GCMP          SUITE(0x000FAC, 8)
+#define WLAN_CIPHER_SUITE_GCMP_256      SUITE(0x000FAC, 9)
+#define WLAN_CIPHER_SUITE_CCMP_256      SUITE(0x000FAC, 10)
+
+
+static void get_cipher_info(u32 cipher, int *ciphers_capa)
+{
+	switch (cipher) {
+	case WLAN_CIPHER_SUITE_WEP40:
+	case WLAN_CIPHER_SUITE_WEP104:
+		*ciphers_capa |= BIT(AP_WEP);
+		break;
+	case WLAN_CIPHER_SUITE_TKIP:
+		*ciphers_capa |= BIT(AP_TKIP);
+		break;
+	case WLAN_CIPHER_SUITE_CCMP:
+		*ciphers_capa |= BIT(AP_CCMP);
+		break;
+	case WLAN_CIPHER_SUITE_GCMP:
+		*ciphers_capa |= BIT(AP_GCMP_128);
+		break;
+	case WLAN_CIPHER_SUITE_GCMP_256:
+		*ciphers_capa |= BIT(AP_GCMP_256);
+		break;
+	case WLAN_CIPHER_SUITE_CCMP_256:
+		*ciphers_capa |= BIT(AP_CCMP_256);
+		break;
+	}
+}
+
+
 #define IEEE80211_HT_AMPDU_PARAM_FACTOR        0x3
 #define IEEE80211_HT_AMPDU_PARAM_DENSITY_SHIFT	2
 
@@ -10610,8 +10809,8 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct sigma_dut *dut = arg;
 	unsigned int tx_antenna_mask;
-	struct nlattr *nl_band;
-	int rem_band;
+	struct nlattr *nl_band, *nl_cipher;
+	int rem_band, rem_cipher;
 
 	nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
 		  genlmsg_attrlen(gnlh, 0), NULL);
@@ -10638,6 +10837,15 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 	if (dut->program == PROGRAM_HE &&
 	    !(dut->hw_modes.ap_he_phy_capab[33 / 8] & (1 << (33 % 8))))
 		dut->ap_mu_txBF = 0;
+
+	if (tb[NL80211_ATTR_CIPHER_SUITES]) {
+		nla_for_each_nested(nl_cipher, tb[NL80211_ATTR_CIPHER_SUITES],
+				    rem_cipher) {
+			u32 cipher = nla_get_u32(nl_cipher);
+
+			get_cipher_info(cipher, &dut->ciphers_capa);
+		}
+	}
 
 	return 0;
 }
@@ -10826,6 +11034,9 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->wsc_fragment = 0;
 	dut->eap_fragment = 0;
 	dut->wps_forced_version = 0;
+	dut->secure_ltf_supported = -1;
+	dut->ap_pasn_unauth = -1;
+	dut->ap_pasn = PASN_DISABLED;
 
 	if (dut->program == PROGRAM_HT || dut->program == PROGRAM_VHT) {
 		dut->ap_wme = AP_WME_ON;
@@ -11010,6 +11221,12 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 		dut->ap_gas_cb_delay = 0;
 		dut->ap_msnt_type = 0;
 	}
+	if (dut->program == PROGRAM_PR) {
+		dut->i2rlmrpolicy = LOC_FORCE_FTM_I2R_LMR_POLICY;
+		dut->urnm_mfpr_x20 = 1;
+		dut->rnm_mfp = 0;
+		dut->secure_ltf_supported = 1;
+	}
 	dut->ap_ft_oa = 0;
 	dut->ap_ft_ds = VALUE_NOT_SET;
 	dut->ap_reg_domain = REG_DOMAIN_NOT_SET;
@@ -11100,7 +11317,8 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 			dut->ap_mu_txBF = 0;
 			dut->he_sounding = VALUE_DISABLED;
 		} else {
-			if (drv == DRIVER_WCN || drv == DRIVER_LINUX_WCN) {
+			if (drv == DRIVER_WCN || drv == DRIVER_LINUX_WCN ||
+			    drv == DRIVER_MAC80211) {
 				dut->ap_txBF = 0;
 				dut->ap_mu_txBF = 0;
 			} else {
@@ -15339,6 +15557,9 @@ static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
 	int16_t he_ltf = 0xFF;
 	char *mode = dut->use_5g ? "5" : "2.4";
 	int ret = -1;
+
+	if (dut->ap_band_6g)
+		mode = "6";
 
 	if (dut->ar_ltf) {
 		he_ltf = mac80211_he_ltf_mapping(dut, dut->ar_ltf);
