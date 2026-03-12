@@ -6917,6 +6917,14 @@ static int mbo_set_cellular_data_capa(struct sigma_dut *dut,
 static int mbo_set_roaming(struct sigma_dut *dut, struct sigma_conn *conn,
 			   const char *intf, const char *val)
 {
+	/* mac80211 drivers rely on wpa_supplicant to manage roaming behavior.
+	 * Roaming is controlled via wpa_supplicant configuration. No additional
+	 * handling is required in sigma_dut. Therefore, simply return success
+	 * without issuing SET roaming commands.
+	 */
+	if (get_driver_type(dut) == DRIVER_MAC80211)
+		return 1;
+
 	if (strcasecmp(val, "Disable") == 0) {
 		if (wpa_command(intf, "SET roaming 0") < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
@@ -8661,6 +8669,27 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 			novap_reset(dut, intf, 1);
 			ath_config_dyn_bw_sig(dut, intf, val);
 			break;
+		case DRIVER_MAC80211:
+			if (strcasecmp(val, "enable") == 0) {
+				res = fwtest_cmd_wrapper(dut,
+							 "-t 2 -m 0x0 -p 1 0xa 1",
+							 intf);
+				if (res) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to enable dynamic BW signalling");
+					return ERROR_SEND_STATUS;
+				}
+			} else if (strcasecmp(val, "disable") == 0) {
+				res = fwtest_cmd_wrapper(dut,
+							 "-t 2 -m 0x0 -p 1 0xa 0",
+							 intf);
+				if (res) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to disable dynamic BW signalling");
+					return ERROR_SEND_STATUS;
+				}
+			}
+			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to set DYN_BW_SGNL");
@@ -8741,6 +8770,16 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 							set_val);
 					return ERROR_SEND_STATUS;
 				}
+			}
+		} else if (get_driver_type(dut) == DRIVER_MAC80211) {
+			if (set_val) {
+				fwtest_cmd_wrapper(dut,
+						   "-t 2 -m 0x0 -p 1 0xa 1",
+						   intf);
+			} else {
+				fwtest_cmd_wrapper(dut,
+						   "-t 2 -m 0x0 -p 1 0xa 0",
+						   intf);
 			}
 		} else {
 			run_iwpriv(dut, intf, "cwmenable %d", set_val);
@@ -13618,9 +13657,27 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 		else if (strcasecmp(val, "Disable") == 0)
 			set_val = 0;
 
-		if (sta_set_om_ctrl_supp(dut, intf, set_val)) {
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_om_ctrl_supp(dut, intf, set_val)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to set OM ctrl supp");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			/* For mac80211 drivers, there is no provision to
+			 * control HE OMI, OMControl is enabled by default.
+			 */
+			if (set_val == 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to disable OM ctrl supp");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,Failed to set OM ctrl supp");
+				  "ErrorCode,Setting OM ctrl not supported");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -19179,6 +19236,98 @@ failed:
 }
 
 
+static int
+mac80211_sta_transmit_omi(struct sigma_dut *dut, struct sigma_conn *conn,
+			  struct sigma_cmd *cmd)
+{
+	int ret;
+	const char *val;
+	const char *intf = get_param(cmd, "Interface");
+	uint32_t param_value = 0x7;
+	char bssid[20];
+	char buf[100];
+
+	/* [6-8] rx_nss: max number of RX spatial streams */
+	val = get_param(cmd, "OMCtrl_RxNSS");
+	if (val) {
+		int rx_nss;
+
+		rx_nss = atoi(val);
+		if (rx_nss < 0 || rx_nss > 7) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid RxNSS value");
+			return -1;
+		}
+		param_value |= rx_nss << 6;
+	}
+
+	/* [9-10] ch_bw: channel width supported by STA for both reception and
+	 * transmission */
+	val = get_param(cmd, "OMCtrl_ChnlWidth");
+	if (val) {
+		int ch_bw;
+
+		ch_bw = atoi(val);
+		if (ch_bw < 0 || ch_bw > 3) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid ChannelWidth value");
+			return -1;
+		}
+		param_value |= ch_bw << 9;
+	}
+
+	/* [11] ulmu_dis: disable the transmission of UL MU */
+	val = get_param(cmd, "OMCtrl_ULMUDisable");
+	if (val) {
+		int ulmu_dis;
+
+		ulmu_dis = atoi(val);
+		if (ulmu_dis < 0 || ulmu_dis > 1) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid ULMUDisable value");
+			return -1;
+		}
+		param_value |= ulmu_dis << 11;
+	}
+
+	/* [12-14] tx_nsts: max number of TX space-time streams */
+	val = get_param(cmd, "OMCtrl_TxNSTS");
+	if (val) {
+		int tx_nsts;
+
+		tx_nsts = atoi(val);
+		if (tx_nsts < 0 || tx_nsts > 7) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid TxNSTS value");
+			return -1;
+		}
+		param_value |= tx_nsts << 12;
+	}
+
+	/* [17] ulmu_data_dis: disable the transmission of UL MU data */
+	val = get_param(cmd, "OMCtrl_ULMUDataDisable");
+	if (val) {
+		int ulmu_data_dis;
+
+		ulmu_data_dis = atoi(val);
+		if (ulmu_data_dis < 0 || ulmu_data_dis > 1) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid ULMUDataDisable value");
+			return -1;
+		}
+		param_value |= ulmu_data_dis << 17;
+	}
+
+	ret = get_wpa_status(intf, "bssid", bssid, sizeof(bssid));
+	if (ret < 0)
+		return ret;
+
+	snprintf(buf, sizeof(buf), "-t 3 -m 0 -v 0 -a %s 0x1c %d",
+		 bssid, param_value);
+	return fwtest_cmd_wrapper(dut, buf, intf);
+}
+
+
 static int mac80211_he_ltf_mapping(struct sigma_dut *dut,
 				   const char *val)
 {
@@ -19298,6 +19447,13 @@ mac80211_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 		res = mac80211_he_gi(dut, intf, val);
 		if (res != SUCCESS_SEND_STATUS)
 			return res;
+	}
+
+	val = get_param(cmd, "transmitOMI");
+	if (val && mac80211_sta_transmit_omi(dut, conn, cmd)) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,sta_transmit_omi failed");
+		return STATUS_SENT_ERROR;
 	}
 
 	return SUCCESS_SEND_STATUS;
