@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2021, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -601,6 +602,21 @@ struct twt_config_params {
 	int ifindex;
 };
 
+struct ap_mlo_link {
+	bool configured;
+	int chwidth;
+	int channel;
+	int dtim;
+	bool treat_6ghz_as_5ghz; /* In case of dual 5 GHz case */
+};
+
+enum ap_band {
+	AP_BAND_24GHz,
+	AP_BAND_5GHz,
+	AP_BAND_6GHz,
+	AP_BAND_MAX,
+};
+
 struct sigma_dut {
 	const char *main_ifname;
 	char *main_ifname_2g;
@@ -611,10 +627,12 @@ struct sigma_dut {
 	char *p2p_ifname_buf;
 	int use_5g;
 	int ap_band_6g;
+	int ap_band;
 	int ap_center_freq;
 	int ap_punct_bitmap;
 	int sta_2g_started;
 	int sta_5g_started;
+	struct ap_mlo_link ap_mlo_links[AP_BAND_MAX];
 
 	int s; /* server TCP socket */
 	int debug_level;
@@ -947,6 +965,7 @@ struct sigma_dut {
 	int ap_name;
 	int ap_interface_5g;
 	int ap_interface_2g;
+	int ap_interface_6g;
 	int ap_assoc_delay;
 	int ap_btmreq_bss_term_tsf;
 	int ap_fils_dscv_int;
@@ -1065,6 +1084,7 @@ struct sigma_dut {
 	const char *set_macaddr;
 	int tmp_mac_addr;
 	int ap_is_dual;
+	int ap_is_mlo;
 	enum ap_mode ap_mode_1;
 	enum ap_chwidth ap_chwidth_1;
 	int ap_channel_1;
