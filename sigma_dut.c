@@ -40,7 +40,7 @@ char *sigma_cert_path = "/etc/wpa_supplicant";
 int sigma_wmm_ac = 0;
 
 
-#ifdef ANDROID
+#if defined(ANDROID) || defined(LINUX_EMBEDDED)
 #include <android/log.h>
 
 #ifdef ANDROID_WIFI_HAL
