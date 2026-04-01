@@ -44,7 +44,7 @@ int sigma_wmm_ac = 0;
  */
 int sigma_periodic_data = 0;
 
-#ifdef ANDROID
+#if defined(ANDROID) || defined(LINUX_EMBEDDED)
 #include <android/log.h>
 
 #ifdef ANDROID_WIFI_HAL
