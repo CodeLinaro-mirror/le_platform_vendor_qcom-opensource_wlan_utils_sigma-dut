@@ -2715,6 +2715,12 @@ static enum sigma_cmd_result cmd_sta_set_psk(struct sigma_dut *dut,
 	if (val && set_network_quoted(ifname, id, "sae_password_id", val) < 0)
 		return ERROR_SEND_STATUS;
 
+	val = get_param(cmd, "PasswordIDChange");
+	if (val &&
+	    set_network(ifname, id, "sae_password_id_change",
+			get_enable_disable(val) ? "1" : "0") < 0)
+		return ERROR_SEND_STATUS;
+
 	val = get_param(cmd, "ECGroupID");
 	if (val) {
 		snprintf(buf, sizeof(buf), "SET sae_groups %s", val);
@@ -20235,6 +20241,8 @@ static enum sigma_cmd_result cmd_sta_set_pwrsave(struct sigma_dut *dut,
 		return cmd_sta_set_power_save_wcn(intf, dut, conn, cmd);
 	} else if (prog && get_driver_type(dut) == DRIVER_MAC80211 &&
 		   strcasecmp(prog, "HE") == 0) {
+		if (!powersave)
+			return INVALID_SEND_STATUS;
 		if (strcasecmp(powersave, "On") == 0)
 			res = set_ps(intf, dut, 1);
 		else if (strcasecmp(powersave, "Off") == 0)
