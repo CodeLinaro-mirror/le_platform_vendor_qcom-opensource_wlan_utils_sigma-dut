@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2021, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -127,11 +128,11 @@ static void ath_ap_set_params(struct sigma_dut *dut);
 static int kill_process(struct sigma_dut *dut, char *proc_name,
 			unsigned char is_proc_instance_one, int sig);
 static int get_oper_centr_freq_seq_idx(struct sigma_dut *dut, int chwidth,
-				       int channel);
+				       int channel, int band);
 
 
-static int fwtest_cmd_wrapper(struct sigma_dut *dut, const char *arg,
-			       const char *ifname)
+int fwtest_cmd_wrapper(struct sigma_dut *dut, const char *arg,
+		       const char *ifname)
 {
 	int ret = -1;
 
@@ -884,6 +885,33 @@ static void get_he_mcs_nssmap(uint8_t *mcsnssmap, uint8_t nss,
 }
 
 
+static void ap_set_wireless_pr(struct sigma_dut *dut, struct sigma_conn *conn,
+			       struct sigma_cmd *cmd)
+{
+	const char *val = get_param(cmd, "SecureLTFSupported");
+
+	if (val)
+		dut->secure_ltf_supported = get_enable_disable(val);
+
+	val = get_param(cmd, "PASN_UNAUTH");
+	if (val)
+		dut->ap_pasn_unauth = atoi(val);
+
+	val = get_param(cmd, "RNM_MFP");
+	if (val)
+		dut->rnm_mfp = atoi(val);
+
+	val = get_param(cmd, "URNM_MFPR_X20");
+	if (val)
+		dut->urnm_mfpr_x20 = strcasecmp(val, "Disable") != 0;
+
+	val = get_param(cmd, "I2RLMRFeedbackPolicy");
+	if (val)
+		dut->i2rlmrpolicy = atoi(val);
+
+}
+
+
 #ifdef NL80211_SUPPORT
 static int wcn_set_txbf_periodic_ndp(struct sigma_dut *dut, const char *intf,
 				     uint8_t cfg_val)
@@ -943,12 +971,23 @@ static int wcn_set_txbf_periodic_ndp(struct sigma_dut *dut, const char *intf,
 
 
 static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
-					const char *punct_channel_list)
+					const char *punct_channel_list,
+					int mlo_band)
 {
 	int center_chan_idx, start_chan_idx, end_chan_idx;
-	int chwidth, punct_bitmap = 0;
+	int chwidth, punct_bitmap = 0, ap_chwidth, ap_channel, ap_band;
 
-	switch (dut->ap_chwidth) {
+	if (dut->ap_mode != AP_11be) {
+		ap_chwidth = dut->ap_chwidth;
+		ap_channel = dut->ap_channel;
+		ap_band = dut->ap_band;
+	} else {
+		ap_chwidth = dut->ap_mlo_links[mlo_band].chwidth;
+		ap_channel = dut->ap_mlo_links[mlo_band].channel;
+		ap_band = mlo_band;
+	}
+
+	switch (ap_chwidth) {
 	case AP_80:
 		chwidth = 80;
 		break;
@@ -968,7 +1007,8 @@ static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
 		center_chan_idx = freq_to_chan(dut->ap_center_freq);
 	else
 		center_chan_idx = get_oper_centr_freq_seq_idx(dut, chwidth,
-							      dut->ap_channel);
+							      ap_channel,
+							      ap_band);
 	if (center_chan_idx < 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"%s: couldn't get center channel index",
@@ -1019,6 +1059,40 @@ static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
 }
 
 
+static int get_channel_band(int channel)
+{
+	int i;
+	int chan_list_2g[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
+	int chan_list_5g[] = { 36, 40, 44, 48, 52, 60, 64, 100, 104, 108,
+			       112, 116, 120, 124, 128, 132, 140, 144, 149,
+			       153, 157, 161, 165 };
+	int chan_list_6g[] = { 2, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41,
+			       45, 49, 53, 57, 61, 65, 69, 73, 77, 81, 85,
+			       89, 93, 97, 101, 105, 109, 113, 117, 121,
+			       125, 129, 133, 137, 141, 145, 149, 153, 157,
+			       161, 165, 169, 173, 177, 181, 185, 189, 193,
+			       197, 201, 205, 209, 213, 217, 221, 225, 229,
+			       233 };
+
+	for (i = 0; i < ARRAY_SIZE(chan_list_2g); i++) {
+		if (channel == chan_list_2g[i])
+			return AP_BAND_24GHz;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(chan_list_5g); i++) {
+		if (channel == chan_list_5g[i])
+			return AP_BAND_5GHz;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(chan_list_6g); i++) {
+		if (channel == chan_list_6g[i])
+			return AP_BAND_6GHz;
+	}
+
+	return AP_BAND_MAX;
+}
+
+
 static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 						 struct sigma_conn *conn,
 						 struct sigma_cmd *cmd)
@@ -1030,6 +1104,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	const char *ifname = get_main_ifname(dut);
 	char buf[128];
 	int subeamformermode = 0;
+	int mlo_config_band = -1;
 
 	/* Allow program to be overridden if specified in the ap_set_wireless
 	 * to support some 60 GHz test scripts where the program may be 60 GHz
@@ -1037,6 +1112,9 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	val = get_param(cmd, "PROGRAM");
 	if (val)
 		dut->program = sigma_program_to_enum(val);
+
+	if (dut->program == PROGRAM_PR)
+		ap_set_wireless_pr(dut, conn, cmd);
 
 	val = get_param(cmd, "WLAN_TAG");
 	if (val) {
@@ -1052,15 +1130,103 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		}
 	}
 
+	val = get_param(cmd, "MODE");
+	if (val) {
+		char *str, *pos;
+
+		str = strdup(val);
+		if (str == NULL)
+			return INVALID_SEND_STATUS;
+		pos = strchr(str, ';');
+		if (pos)
+			*pos++ = '\0';
+		if (wlan_tag != 2)
+			dut->ap_is_dual = 0;
+		dut->ap_mode = get_mode(str);
+		if (dut->ap_mode == AP_inval) {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported MODE");
+			free(str);
+			return STATUS_SENT;
+		}
+		if (dut->ap_mode == AP_11ac && dut->ap_80plus80 != 1)
+			dut->ap_chwidth = AP_80;
+
+		if (pos) {
+			dut->ap_mode_1 = get_mode(pos);
+			if (dut->ap_mode_1 == AP_inval) {
+				send_resp(dut, conn, SIGMA_INVALID,
+					  "errorCode,Unsupported MODE");
+				free(str);
+				return STATUS_SENT;
+			}
+			if (dut->ap_mode_1 == AP_11ac)
+				dut->ap_chwidth_1 = AP_80;
+			dut->ap_is_dual = 1;
+		}
+
+		free(str);
+	} else if (dut->ap_mode == AP_inval) {
+		if (dut->ap_channel <= 11)
+			dut->ap_mode = AP_11ng;
+		else if (dut->program == PROGRAM_VHT)
+			dut->ap_mode = AP_11ac;
+		else
+			dut->ap_mode = AP_11na;
+	}
+
 	val = get_param(cmd, "Interface");
 	if (val) {
-		if (strcasecmp(val, "5G") == 0)
+		if (strcasecmp(val, "5G") == 0) {
 			dut->ap_interface_5g = 1;
-		else
+			dut->ap_band = AP_BAND_5GHz;
+			if (dut->ap_mode == AP_11be) {
+				dut->ap_mlo_links[AP_BAND_5GHz].configured =
+					true;
+				dut->ap_interface_5g = 1;
+				mlo_config_band = AP_BAND_5GHz;
+				if (wlan_tag == 2) {
+					dut->ap_interface_6g = 1;
+					mlo_config_band = AP_BAND_6GHz;
+					dut->ap_mlo_links[AP_BAND_6GHz].
+						configured = true;
+					dut->ap_mlo_links[AP_BAND_6GHz].
+						treat_6ghz_as_5ghz = true;
+				}
+			}
+		} else if (strcasecmp(val, "24G") == 0) {
 			dut->ap_interface_2g = 1;
+			dut->ap_band = AP_BAND_24GHz;
+			if (dut->ap_mode == AP_11be) {
+				dut->ap_mlo_links[AP_BAND_24GHz].configured =
+					true;
+				dut->ap_interface_2g = 1;
+				mlo_config_band = AP_BAND_24GHz;
+			}
+		} else if (strcasecmp(val, "6G") == 0) {
+			dut->ap_interface_6g = 1;
+			dut->ap_band = AP_BAND_6GHz;
+			if (dut->ap_mode == AP_11be) {
+				dut->ap_mlo_links[AP_BAND_6GHz].configured =
+					true;
+				dut->ap_interface_6g = 1;
+				mlo_config_band = AP_BAND_6GHz;
+			}
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Invalid Interface");
+			return STATUS_SENT;
+		}
 
-		if (dut->ap_interface_5g && dut->ap_interface_2g)
+		if (dut->ap_mode != AP_11be &&
+		    dut->ap_interface_5g && dut->ap_interface_2g)
 			dut->ap_is_dual = 1;
+
+		if (dut->ap_mode == AP_11be &&
+		    ((dut->ap_interface_5g && dut->ap_interface_2g) ||
+		     (dut->ap_interface_6g && dut->ap_interface_2g) ||
+		     (dut->ap_interface_6g && dut->ap_interface_5g)))
+			dut->ap_is_mlo = 1;
 	}
 
 	val = get_param(cmd, "CountryCode");
@@ -1127,16 +1293,35 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		} else {
 			dut->ap_tag_channel[wlan_tag - 2] = atoi(val);
 		}
+
+		if (dut->ap_mode == AP_11be) {
+			if (mlo_config_band == -1) {
+				mlo_config_band = get_channel_band(atoi(val));
+				if (mlo_config_band == AP_BAND_MAX) {
+					send_resp(dut, conn, SIGMA_ERROR,
+						  "errorCode,Invalid channel value");
+					sigma_dut_print(dut, DUT_MSG_INFO,
+						"Invalid channel %d",
+							atoi(val));
+					return STATUS_SENT_ERROR;
+				}
+				dut->ap_mlo_links[mlo_config_band].configured =
+					true;
+			}
+			dut->ap_mlo_links[mlo_config_band].channel = atoi(val);
+		}
 	}
 
 	val = get_param(cmd, "ChnlFreq");
 	if (val) {
 		int freq = atoi(val);
 
-		if (is_6ghz_freq(freq))
+		if (is_6ghz_freq(freq)) {
 			dut->ap_band_6g = 1;
-		else
+			dut->ap_band = AP_BAND_6GHz;
+		} else {
 			dut->ap_band_6g = 0;
+		}
 
 		dut->ap_center_freq = 0;
 		if (get_param(cmd, "CHANNEL")) {
@@ -1165,51 +1350,6 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		else
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Unsupported dfs_mode value: %s", val);
-	}
-
-	val = get_param(cmd, "MODE");
-	if (val) {
-		char *str, *pos;
-
-		str = strdup(val);
-		if (str == NULL)
-			return INVALID_SEND_STATUS;
-		pos = strchr(str, ';');
-		if (pos)
-			*pos++ = '\0';
-		if (wlan_tag != 2)
-			dut->ap_is_dual = 0;
-		dut->ap_mode = get_mode(str);
-		if (dut->ap_mode == AP_inval) {
-			send_resp(dut, conn, SIGMA_INVALID,
-				  "errorCode,Unsupported MODE");
-			free(str);
-			return STATUS_SENT;
-		}
-		if (dut->ap_mode == AP_11ac && dut->ap_80plus80 != 1)
-			dut->ap_chwidth = AP_80;
-
-		if (pos) {
-			dut->ap_mode_1 = get_mode(pos);
-			if (dut->ap_mode_1 == AP_inval) {
-				send_resp(dut, conn, SIGMA_INVALID,
-					  "errorCode,Unsupported MODE");
-				free(str);
-				return STATUS_SENT;
-			}
-			if (dut->ap_mode_1 == AP_11ac)
-				dut->ap_chwidth_1 = AP_80;
-			dut->ap_is_dual = 1;
-		}
-
-		free(str);
-	} else if (dut->ap_mode == AP_inval) {
-		if (dut->ap_channel <= 11)
-			dut->ap_mode = AP_11ng;
-		else if (dut->program == PROGRAM_VHT)
-			dut->ap_mode = AP_11ac;
-		else
-			dut->ap_mode = AP_11na;
 	}
 
 	/* Override the AP mode in case of 60 GHz */
@@ -1245,7 +1385,8 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		break;
 	}
 
-	if (dut->ap_is_dual)
+	/* use_5g is used to determine hw_mode, so also set it for MLO case */
+	if (dut->ap_is_dual || dut->ap_is_mlo)
 		dut->use_5g = 1;
 
 	val = get_param(cmd, "WME");
@@ -1283,6 +1424,10 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	val = get_param(cmd, "BCNINT");
 	if (val)
 		dut->ap_bcnint = atoi(val);
+
+	val = get_param(cmd, "DTIM");
+	if (val && dut->ap_mode == AP_11be)
+		dut->ap_mlo_links[mlo_config_band].dtim = atoi(val);
 
 	val = get_param(cmd, "RADIO");
 	if (val) {
@@ -1521,7 +1666,28 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	}
 
 	val = get_param(cmd, "WIDTH");
-	if (val) {
+	if (val && dut->ap_mode != AP_11be && mlo_config_band > -1) {
+		if (strcasecmp(val, "20") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_20;
+		} else if (strcasecmp(val, "40") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_40;
+		} else if (strcasecmp(val, "80") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_80;
+		} else if (strcasecmp(val, "160") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_160;
+		} else if (strcasecmp(val, "320") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_320;
+		} else if (strcasecmp(val, "80plus80") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_80_80;
+			dut->ap_80plus80 = 1;
+		} else if (strcasecmp(val, "Auto") == 0) {
+			dut->ap_mlo_links[mlo_config_band].chwidth = AP_AUTO;
+		} else {
+			send_resp(dut, conn, SIGMA_INVALID,
+				  "errorCode,Unsupported WIDTH");
+			return STATUS_SENT;
+		}
+	} else if (val) {
 		if (strcasecmp(val, "20") == 0)
 			dut->ap_chwidth = AP_20;
 		else if (strcasecmp(val, "40") == 0)
@@ -2504,7 +2670,8 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 
 	val = get_param(cmd, "PunctChannel");
 	if (val) {
-		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(dut, val);
+		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(
+						dut, val, mlo_config_band);
 		if (dut->ap_punct_bitmap < 0) {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Invalid PunctChannel");
@@ -2904,6 +3071,16 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 			dut->ap_key_mgmt = AP_WPA2_ENT_FT_EAP;
 			dut->ap_cipher = AP_CCMP;
 			dut->ap_pmf = AP_PMF_OPTIONAL;
+		} else if (strcasecmp(val, "PASN") == 0) {
+			dut->ap_key_mgmt = AP_PASN;
+			dut->ap_cipher = AP_CCMP;
+			dut->ap_pasn = PASN_ENABLED;
+			dut->ap_pmf = AP_PMF_REQUIRED;
+		} else if (strcasecmp(val, "PASN-SAE") == 0) {
+			dut->ap_key_mgmt = AP_PASN_SAE;
+			dut->ap_cipher = AP_CCMP;
+			dut->ap_pasn = PASN_ENABLED;
+			dut->ap_pmf = AP_PMF_REQUIRED;
 		} else if (strcasecmp(val, "NONE") == 0) {
 			dut->ap_key_mgmt = AP_OPEN;
 			dut->ap_cipher = AP_PLAIN;
@@ -3239,17 +3416,19 @@ static enum sigma_cmd_result cmd_ap_set_security(struct sigma_dut *dut,
 	val = get_param(cmd, "BeaconProtection");
 	if (val)
 		dut->ap_beacon_prot = atoi(val);
+	else if (dut->ap_mode == AP_11be)
+		dut->ap_beacon_prot = 1;
 
 	val = get_param(cmd, "Transition_Disable");
 	if (val) {
 		if (atoi(val)) {
+			/* Use WPA3-Personal Only by default for transition
+			 * disable index if no specific bit is identified. */
 			val = get_param(cmd, "Transition_Disable_Index");
-			if (!val) {
-				send_resp(dut, conn, SIGMA_INVALID,
-					  "errorCode,Transition_Disable without Transition_Disable_Index");
-				return STATUS_SENT;
-			}
-			dut->ap_transition_disable = 1 << atoi(val);
+			if (val)
+				dut->ap_transition_disable = 1 << atoi(val);
+			else
+				dut->ap_transition_disable = 1;
 			if (dut->ap_pmf == AP_PMF_DISABLED && !pmf_set)
 				dut->ap_pmf = AP_PMF_OPTIONAL;
 		} else {
@@ -4130,11 +4309,11 @@ static void get_if_name(struct sigma_dut *dut, char *ifname_str,
 	ifname = get_hostapd_ifname(dut);
 	drv = get_driver_type(dut);
 
-	if (drv == DRIVER_OPENWRT && wlan_tag > 1) {
+	if (drv == DRIVER_OPENWRT && wlan_tag > 1 && dut->ap_mode != AP_11be) {
 		/* Handle tagged-ifname only on OPENWRT for now */
 		snprintf(ifname_str, str_size, "%s%d", ifname, wlan_tag - 1);
 	} else if ((drv == DRIVER_MAC80211 || drv == DRIVER_LINUX_WCN) &&
-		   wlan_tag == 2) {
+		   wlan_tag == 2 && dut->ap_mode != AP_11be) {
 		snprintf(ifname_str, str_size, "%s_1", ifname);
 	} else {
 		snprintf(ifname_str, str_size, "%s", ifname);
@@ -4628,6 +4807,8 @@ static int owrt_ap_config_vap(struct sigma_dut *dut)
 		case AP_WPA2_EAP_SHA256:
 		case AP_WPA2_PSK_SHA256:
 		case AP_WPA2_ENT_FT_EAP:
+		case AP_PASN:
+		case AP_PASN_SAE:
 			/* TODO */
 			break;
 		case AP_SUITEB:
@@ -5643,6 +5824,8 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 	case AP_WPA2_EAP_SHA256:
 	case AP_WPA2_PSK_SHA256:
 	case AP_WPA2_ENT_FT_EAP:
+	case AP_PASN:
+	case AP_PASN_SAE:
 	case AP_WPA3_SAE_EXT:
 		/* Not supported */
 		break;
@@ -7873,6 +8056,8 @@ static int cmd_ath_ap_config_commit(struct sigma_dut *dut,
 	case AP_WPA2_PSK_SHA256:
 	case AP_WPA2_ENT_FT_EAP:
 	case AP_OSEN:
+	case AP_PASN:
+	case AP_PASN_SAE:
 	case AP_WPA3_SAE_EXT:
 		/* TODO */
 		send_resp(dut, conn, SIGMA_ERROR,
@@ -7988,6 +8173,8 @@ static int cmd_ath_ap_config_commit(struct sigma_dut *dut,
 		case AP_WPA2_PSK_SHA256:
 		case AP_WPA2_ENT_FT_EAP:
 		case AP_OSEN:
+		case AP_PASN:
+		case AP_PASN_SAE:
 		case AP_WPA3_SAE_EXT:
 			/* TODO */
 			send_resp(dut, conn, SIGMA_ERROR,
@@ -8307,7 +8494,7 @@ static void set_ebtables_forward_drop(struct sigma_dut *dut,
 }
 
 
-static int check_channel(struct sigma_dut *dut, int channel)
+static int check_channel(struct sigma_dut *dut, int channel, int band)
 {
 	int channel_list[] = { 36, 40, 44, 48, 52, 60, 64, 100, 104, 108, 112,
 			       116, 120, 124, 128, 132, 140, 144, 149, 153, 157,
@@ -8321,7 +8508,7 @@ static int check_channel(struct sigma_dut *dut, int channel)
 	int num_chan, *chan_list;
 	int i;
 
-	if (dut->ap_band_6g) {
+	if (band == AP_BAND_6GHz) {
 		num_chan = ARRAY_SIZE(chan_list_6g);
 		chan_list = chan_list_6g;
 	} else {
@@ -8384,15 +8571,15 @@ static int get_6g_ch_op_class(int channel)
 
 
 static int get_oper_centr_freq_seq_idx(struct sigma_dut *dut, int chwidth,
-				       int channel)
+				       int channel, int band)
 {
 	int ch_base;
 	int period;
 
-	if (check_channel(dut, channel) < 0)
+	if (check_channel(dut, channel, band) < 0)
 		return -1;
 
-	if (dut->ap_band_6g)
+	if (band == AP_BAND_6GHz)
 		return get_oper_center_freq_6g(chwidth, channel);
 
 	if (channel >= 36 && channel <= 64)
@@ -8815,6 +9002,39 @@ static void set_second_ap_security_conf(FILE *file, struct sigma_dut *dut)
 }
 
 
+static int cipher_support(int ciphers_capa, enum ap_cipher cipher)
+{
+	if (!ciphers_capa)
+		return 1;
+
+	switch (cipher) {
+	case AP_WEP:
+		return !!(ciphers_capa & BIT(AP_WEP));
+	case AP_TKIP:
+		return !!(ciphers_capa & BIT(AP_TKIP));
+	case AP_CCMP:
+		return !!(ciphers_capa & BIT(AP_CCMP));
+	case AP_GCMP_128:
+		return !!(ciphers_capa & BIT(AP_GCMP_128));
+	case AP_GCMP_256:
+		return !!(ciphers_capa & BIT(AP_GCMP_256));
+	case AP_CCMP_256:
+		return !!(ciphers_capa & BIT(AP_CCMP_256));
+	case AP_CCMP_TKIP:
+		return !!((ciphers_capa & BIT(AP_CCMP)) &&
+			  (ciphers_capa & BIT(AP_TKIP)));
+	case AP_CCMP_128_GCMP_256:
+		return !!((ciphers_capa & BIT(AP_CCMP)) &&
+			  (ciphers_capa & BIT(AP_GCMP_256)));
+	case AP_PLAIN:
+		return 1;
+	case AP_NO_GROUP_CIPHER_SET:
+	default:
+		return 0;
+	}
+}
+
+
 enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 					   struct sigma_conn *conn,
 					   struct sigma_cmd *cmd)
@@ -8829,6 +9049,8 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	enum driver_type drv;
 	const char *key_mgmt;
 	int conf_counter = 0;
+	int link_band = -1;
+	int i;
 	bool append_vht = false;
 	enum ap_mode mode;
 #ifdef ANDROID
@@ -8838,6 +9060,12 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 
 	drv = get_driver_type(dut);
 	mode = dut->ap_mode;
+
+	if (dut->ap_cipher == AP_WEP &&
+	    !cipher_support(dut->ciphers_capa, AP_WEP)) {
+		send_resp(dut, conn, SIGMA_ERROR, "errorCode,Not supported");
+		return STATUS_SENT_ERROR;
+	}
 
 	if (dut->mode == SIGMA_MODE_STATION) {
 		stop_sta_mode(dut);
@@ -8889,6 +9117,14 @@ write_conf:
 		if (run_system_wrapper(dut, "cp %s %s", f1, f2) != 0)
 			sigma_dut_print(dut, DUT_MSG_INFO,
 					"Failed to copy %s to %s", f1, f2);
+		if (dut->ap_mode == AP_11be) {
+			for (i = AP_BAND_MAX - 1; i >= 0; i--) {
+				if (dut->ap_mlo_links[i].configured) {
+					link_band = i;
+					break;
+				}
+			}
+		}
 
 #ifdef ANDROID
 		if (chmod(f2, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0)
@@ -8901,6 +9137,14 @@ write_conf:
 					"Error changing groupid");
 #endif /* ANDROID */
 	} else {
+		if (dut->ap_mode == AP_11be) {
+			for (i = 0; i < AP_BAND_MAX; i++) {
+				if (dut->ap_mlo_links[i].configured) {
+					link_band = i;
+					break;
+				}
+			}
+		}
 		ap_conf_path_1[0] = '\0';
 	}
 
@@ -8952,6 +9196,12 @@ write_conf:
 					fprintf(f, "hw_mode=a\n");
 				else
 					fprintf(f, "hw_mode=g\n");
+			} else if (dut->ap_is_mlo) {
+				if (link_band == AP_BAND_5GHz ||
+				    link_band == AP_BAND_6GHz)
+					fprintf(f, "hw_mode=a\n");
+				else
+					fprintf(f, "hw_mode=g\n");
 			} else {
 				fprintf(f, "hw_mode=a\n");
 			}
@@ -8979,14 +9229,20 @@ write_conf:
 		fprintf(f, "he_bss_color=%d\n", random_bss_color);
 	}
 
-	if (dut->ap_tx_stbc == VALUE_NOT_SET && drv == DRIVER_LINUX_WCN)
+	if (dut->ap_tx_stbc == VALUE_NOT_SET &&
+	    (drv == DRIVER_LINUX_WCN || drv == DRIVER_MAC80211))
 		dut->ap_tx_stbc = get_driver_ap_tx_stbc_capab(dut);
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
 	     drv == DRIVER_LINUX_WCN) &&
 	    (mode == AP_11ng || mode == AP_11na ||
 	     ((mode == AP_11ax || mode == AP_11be) && !dut->use_5g))) {
-		int ht40plus = 0, ht40minus = 0, tx_stbc = 0;
+		int ht40plus = 0, ht40minus = 0, tx_stbc = 0, sgi_20 = 0,
+			sgi_40 = 0;
+		int chwidth = dut->ap_chwidth;
+
+		if (dut->ap_mode == AP_11be && link_band > -1)
+			chwidth = dut->ap_mlo_links[link_band].chwidth;
 
 		fprintf(f, "ieee80211n=1\n");
 		if (mode == AP_11ax || mode == AP_11be)
@@ -8995,8 +9251,8 @@ write_conf:
 			fprintf(f, "ieee80211be=1\n");
 
 		if (mode == AP_11ng &&
-		    (dut->ap_chwidth == AP_40 ||
-		     (dut->ap_chwidth == AP_AUTO &&
+		    (chwidth == AP_40 ||
+		     (chwidth == AP_AUTO &&
 		      dut->default_11ng_ap_chwidth == AP_40))) {
 			if (dut->ap_channel >= 1 && dut->ap_channel <= 7)
 				ht40plus = 1;
@@ -9007,8 +9263,8 @@ write_conf:
 
 		/* configure ht_capab based on channel width */
 		if (mode == AP_11na &&
-		    (dut->ap_chwidth == AP_40 ||
-		     (dut->ap_chwidth == AP_AUTO &&
+		    (chwidth == AP_40 ||
+		     (chwidth == AP_AUTO &&
 		      dut->default_11na_ap_chwidth == AP_40))) {
 			if (is_ht40plus_chan(dut->ap_channel))
 				ht40plus = 1;
@@ -9020,20 +9276,29 @@ write_conf:
 			tx_stbc = 1;
 
 		/* Overwrite the ht_capab with offset value if configured */
-		if (dut->ap_chwidth == AP_40 &&
+		if (chwidth == AP_40 &&
 		    dut->ap_chwidth_offset == SEC_CH_40ABOVE) {
 			ht40plus = 1;
 			ht40minus = 0;
-		} else if (dut->ap_chwidth == AP_40 &&
+		} else if (chwidth == AP_40 &&
 			   dut->ap_chwidth_offset == SEC_CH_40BELOW) {
 			ht40minus = 1;
 			ht40plus = 0;
 		}
 
-		fprintf(f, "ht_capab=%s%s%s\n",
+		if (drv == DRIVER_MAC80211 && dut->ap_chwidth == AP_20) {
+			sgi_20 = 1;
+		} else if (drv == DRIVER_MAC80211 && dut->ap_chwidth == AP_40) {
+			sgi_20 = 1;
+			sgi_40 = 1;
+		}
+
+		fprintf(f, "ht_capab=%s%s%s%s%s\n",
 			ht40plus ? "[HT40+]" : "",
 			ht40minus ? "[HT40-]" : "",
-			tx_stbc ? "[TX-STBC]" : "");
+			tx_stbc ? "[TX-STBC]" : "",
+			sgi_20 ? "[SHORT-GI-20]" : "",
+			sgi_40 ? "[SHORT-GI-40]" : "");
 	}
 
 	if ((drv == DRIVER_MAC80211 || drv == DRIVER_QNXNTO ||
@@ -9041,6 +9306,13 @@ write_conf:
 	    (mode == AP_11ac ||
 	    ((mode == AP_11ax || mode == AP_11be) && dut->use_5g))) {
 		int ht40plus = 0, ht40minus = 0;
+		int chan = dut->ap_channel;
+		int chwidth = dut->ap_chwidth;
+
+		if (dut->ap_mode == AP_11be && link_band > -1) {
+			chwidth = dut->ap_mlo_links[link_band].chwidth;
+			chan = dut->ap_mlo_links[link_band].channel;
+		}
 
 		fprintf(f, "ieee80211ac=1\n"
 			"ieee80211n=1\n");
@@ -9050,10 +9322,10 @@ write_conf:
 			fprintf(f, "ieee80211be=1\n");
 
 		/* configure ht_capab based on channel width */
-		if (dut->ap_chwidth != AP_20) {
-			if (is_ht40plus_chan(dut->ap_channel))
+		if (chwidth != AP_20) {
+			if (is_ht40plus_chan(chan))
 				ht40plus = 1;
-			else if (is_ht40minus_chan(dut->ap_channel))
+			else if (is_ht40minus_chan(chan))
 				ht40minus = 1;
 
 			fprintf(f, "ht_capab=%s%s\n",
@@ -9110,19 +9382,22 @@ write_conf:
 		}
 
 		fprintf(f, "mld_ap=1\n");
-		/* Use the same MLD and link MAC address */
-		fprintf(f, "mld_addr=%02x:%02x:%02x:%02x:%02x:%02x\n",
-			addr[0], addr[1], addr[2],
-			addr[3], addr[4], addr[5]);
-		fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
-			addr[0], addr[1], addr[2],
-			addr[3], addr[4], addr[5]);
+		if (!dut->ap_is_mlo) {
+			/* Use the same MLD and link MAC address */
+			fprintf(f, "mld_addr=%02x:%02x:%02x:%02x:%02x:%02x\n",
+				addr[0], addr[1], addr[2],
+				addr[3], addr[4], addr[5]);
+			fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
+				addr[0], addr[1], addr[2],
+				addr[3], addr[4], addr[5]);
+		}
 	}
 
 	if (conf_counter == 1) {
 		char ifname2[50];
 
-		snprintf(ifname2, sizeof(ifname2), "%s_1", ifname);
+		snprintf(ifname2, sizeof(ifname2),
+			 dut->ap_is_mlo ? "%s" : "%s_1", ifname);
 		if (if_nametoindex(ifname2) == 0) {
 			if (ap_create_or_remove_interface(dut, ifname2, true)
 			    >= 0) {
@@ -9141,7 +9416,13 @@ write_conf:
 	if (dut->bridge)
 		fprintf(f, "bridge=%s\n", dut->bridge);
 
-	if (dut->ap_is_dual && conf_counter == 1) {
+	if (dut->ap_band_6g && drv == DRIVER_MAC80211)
+		fprintf(f, "unsol_bcast_probe_resp_interval=20\n");
+
+	if (dut->ap_mode == AP_11be && link_band > -1) {
+		fprintf(f, "channel=%d\n",
+			dut->ap_mlo_links[link_band].channel);
+	} else if (dut->ap_is_dual && conf_counter == 1) {
 		if (dut->ap_channel_1)
 			fprintf(f, "channel=%d\n", dut->ap_channel_1);
 		else
@@ -9271,14 +9552,23 @@ write_conf:
 			fprintf(f, "wpa=3\n");
 		else
 			fprintf(f, "wpa=1\n");
-		if (dut->ap_key_mgmt == AP_WPA2_SAE)
-			key_mgmt = "SAE";
-		else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE)
-			key_mgmt = "WPA-PSK SAE";
-		else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT)
+		if (dut->ap_key_mgmt == AP_WPA2_SAE) {
+			if (dut->ap_pasn_unauth != -1 ||
+			    dut->secure_ltf_supported == 1)
+				key_mgmt = "SAE PASN";
+			else
+				key_mgmt = "SAE";
+		} else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE) {
+			if (dut->ap_pasn_unauth != -1 ||
+			    dut->secure_ltf_supported == 1)
+				key_mgmt = "WPA-PSK SAE PASN";
+			else
+				key_mgmt = "WPA-PSK SAE";
+		} else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT) {
 			key_mgmt = "SAE-EXT-KEY";
-		else
+		} else {
 			key_mgmt = "WPA-PSK";
+		}
 		switch (dut->ap_pmf) {
 		case AP_PMF_DISABLED:
 			fprintf(f, "wpa_key_mgmt=%s%s\n", key_mgmt,
@@ -9289,14 +9579,23 @@ write_conf:
 				dut->ap_add_sha256 ? " WPA-PSK-SHA256" : "");
 			break;
 		case AP_PMF_REQUIRED:
-			if (dut->ap_key_mgmt == AP_WPA2_SAE)
-				key_mgmt = "SAE";
-			else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE)
-				key_mgmt = "WPA-PSK-SHA256 SAE";
-			else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT)
+			if (dut->ap_key_mgmt == AP_WPA2_SAE) {
+				if (dut->ap_pasn_unauth != -1 ||
+				    dut->secure_ltf_supported == 1)
+					key_mgmt = "SAE PASN";
+				else
+					key_mgmt = "SAE";
+			} else if (dut->ap_key_mgmt == AP_WPA2_PSK_SAE) {
+				if (dut->ap_pasn_unauth != -1 ||
+				    dut->secure_ltf_supported == 1)
+					key_mgmt = "WPA-PSK-SHA256 SAE PASN";
+				else
+					key_mgmt = "WPA-PSK-SHA256 SAE";
+			} else if (dut->ap_key_mgmt == AP_WPA3_SAE_EXT) {
 				key_mgmt = "SAE-EXT-KEY";
-			else
+			} else {
 				key_mgmt = "WPA-PSK-SHA256";
+			}
 			fprintf(f, "wpa_key_mgmt=%s\n", key_mgmt);
 			break;
 		}
@@ -9399,6 +9698,22 @@ write_conf:
 		fprintf(f, "auth_server_shared_secret=%s\n",
 			dut->ap_radius_password);
 		break;
+	case AP_PASN:
+		fprintf(f, "wpa=2\n");
+		fprintf(f, "rsn_pairwise=CCMP\n");
+		fprintf(f, "wpa_key_mgmt=WPA-PSK SAE PASN\n");
+		fprintf(f, "sae_require_mfp=1\n");
+		fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
+		fprintf(f, "sae_pwe=%d\n", dut->sae_pwe);
+		break;
+	case AP_PASN_SAE:
+		fprintf(f, "wpa=2\n");
+		fprintf(f, "rsn_pairwise=CCMP\n");
+		fprintf(f, "wpa_key_mgmt=SAE PASN\n");
+		fprintf(f, "sae_require_mfp=1\n");
+		fprintf(f, "sae_password=%s\n", dut->ap_passphrase);
+		fprintf(f, "sae_pwe=%d\n", dut->sae_pwe);
+		break;
 	case AP_WPA2_OWE:
 		fprintf(f, "wpa=2\n");
 		fprintf(f, "wpa_key_mgmt=OWE\n");
@@ -9463,6 +9778,11 @@ skip_key_mgmt:
 
 	if (dut->ap_beacon_prot)
 		fprintf(f, "beacon_prot=1\n");
+
+	if (dut->ap_mode == AP_11be && link_band > -1 &&
+	    dut->ap_mlo_links[link_band].dtim)
+		fprintf(f, "dtim_period=%d\n",
+			dut->ap_mlo_links[link_band].dtim);
 
 	if (dut->ap_transition_disable)
 		fprintf(f, "transition_disable=0x%02x\n",
@@ -9545,6 +9865,8 @@ skip_key_mgmt:
 			fprintf(f, "sae_pwe=%s\n", sae_pwe);
 	}
 
+	if (dut->i2rlmrpolicy != 0)
+		fprintf(f, "i2r_lmr_policy=%u\n", dut->i2rlmrpolicy);
 	if (dut->sae_anti_clogging_threshold >= 0)
 		fprintf(f, "sae_anti_clogging_threshold=%d\n",
 			dut->sae_anti_clogging_threshold);
@@ -9755,13 +10077,28 @@ skip_key_mgmt:
 	      dut->program == PROGRAM_WPA3) &&
 	     dut->use_5g)) {
 		int vht_oper_centr_freq_idx;
+		int chan, chwidth, band;
+
+		if (dut->ap_mode == AP_11be && link_band > -1) {
+			chan = dut->ap_mlo_links[link_band].channel;
+			chwidth = dut->ap_mlo_links[link_band].chwidth;
+			band = link_band;
+			if (dut->ap_mlo_links[link_band].treat_6ghz_as_5ghz)
+				band = AP_BAND_5GHz;
+		} else {
+			chan = dut->ap_channel;
+			chwidth = dut->ap_chwidth;
+			band = dut->ap_band;
+		}
 
 		/* Do not try to enable VHT or higher channel bandwidth for HE
 		 * on the 2.4 GHz band when configuring a dual band AP that
 		 * does have VHT enabled on the 5 GHz radio. */
-		if (dut->use_5g) {
+		if (dut->ap_mode == AP_11be) {
+			if (band != AP_BAND_24GHz)
+				append_vht = true;
+		} else if (dut->use_5g) {
 			if (dut->ap_is_dual) {
-				int chan;
 
 				if (conf_counter)
 					chan = dut->ap_tag_channel[0];
@@ -9776,7 +10113,8 @@ skip_key_mgmt:
 		if (!append_vht)
 			goto skip_vht_parameters_set;
 
-		if (check_channel(dut, dut->ap_channel) < 0) {
+		if (band != AP_BAND_24GHz &&
+		    check_channel(dut, chan, band) < 0) {
 			send_resp(dut, conn, SIGMA_INVALID,
 				  "errorCode,Invalid channel");
 			fclose(f);
@@ -9789,42 +10127,42 @@ skip_key_mgmt:
 			goto set_center_freq_idx_conf;
 		}
 
-		switch (dut->ap_chwidth) {
+		switch (chwidth) {
 		case AP_20:
 			dut->ap_vht_chwidth = AP_20_40_VHT_OPER_CHWIDTH;
 			vht_oper_centr_freq_idx =
 				get_oper_centr_freq_seq_idx(dut, 20,
-							    dut->ap_channel);
+							    chan, band);
 			break;
 		case AP_40:
 			dut->ap_vht_chwidth = AP_20_40_VHT_OPER_CHWIDTH;
 			vht_oper_centr_freq_idx =
 				get_oper_centr_freq_seq_idx(dut, 40,
-							    dut->ap_channel);
+							    chan, band);
 			break;
 		case AP_80:
 			dut->ap_vht_chwidth = AP_80_VHT_OPER_CHWIDTH;
 			vht_oper_centr_freq_idx =
 				get_oper_centr_freq_seq_idx(dut, 80,
-							    dut->ap_channel);
+							    chan, band);
 			break;
 		case AP_160:
 			dut->ap_vht_chwidth = AP_160_VHT_OPER_CHWIDTH;
 			vht_oper_centr_freq_idx =
 				get_oper_centr_freq_seq_idx(dut, 160,
-							    dut->ap_channel);
+							    chan, band);
 			break;
 		case AP_320:
 			dut->ap_vht_chwidth = AP_320_VHT_OPER_CHWIDTH;
 			vht_oper_centr_freq_idx =
 				get_oper_centr_freq_seq_idx(dut, 320,
-							    dut->ap_channel);
+							    chan, band);
 			break;
 		default:
 			dut->ap_vht_chwidth = VHT_DEFAULT_OPER_CHWIDTH;
 			vht_oper_centr_freq_idx =
 				get_oper_centr_freq_seq_idx(dut, 80,
-							    dut->ap_channel);
+							    chan, band);
 			break;
 		}
 
@@ -9845,7 +10183,7 @@ set_center_freq_idx_conf:
 				vht_oper_centr_freq_idx);
 		}
 
-		if (dut->ap_band_6g)
+		if (band == AP_BAND_6GHz)
 			fprintf(f, "op_class=%d\n",
 				get_6g_ch_op_class(vht_oper_centr_freq_idx));
 
@@ -9857,9 +10195,9 @@ set_center_freq_idx_conf:
 		     dut->ap_ldpc != VALUE_NOT_SET ||
 		     dut->ap_tx_stbc == VALUE_ENABLED || dut->ap_mu_txBF ||
 		     dut->ap_ampdu_exp || dut->ap_max_mpdu_len ||
-		     dut->ap_chwidth == AP_160 ||
-		     dut->ap_chwidth == AP_80_80 ||
-		     dut->ap_chwidth == AP_320)) {
+		     chwidth == AP_160 ||
+		     chwidth == AP_80_80 ||
+		     chwidth == AP_320)) {
 			fprintf(f, "vht_capab=%s%s%s%s%s%s",
 				dut->ap_sgi80 ? "[SHORT-GI-80]" : "",
 				dut->ap_txBF ?
@@ -9869,9 +10207,9 @@ set_center_freq_idx_conf:
 				(dut->ap_tx_stbc == VALUE_ENABLED) ?
 				"[TX-STBC-2BY1]" : "",
 				dut->ap_mu_txBF ? "[MU-BEAMFORMER]" : "",
-				dut->ap_chwidth == AP_160 ||
-				dut->ap_chwidth == AP_320 ? "[VHT160]" :
-				(dut->ap_chwidth == AP_80_80 ?
+				chwidth == AP_160 ||
+				chwidth == AP_320 ? "[VHT160]" :
+				(chwidth == AP_80_80 ?
 				 "[VHT160-80PLUS80]" : ""));
 
 			if (dut->ap_ampdu_exp)
@@ -9989,9 +10327,15 @@ skip_vht_parameters_set:
 		fprintf(f, "oce=%d\n",
 			dut->dev_role == DEVROLE_STA_CFON ? 2 : 1);
 	}
+	if (dut->program == PROGRAM_PR) {
+		if (dut->ap_pasn_unauth != -1)
+			fprintf(f, "pasn_noauth=%d\n", dut->ap_pasn_unauth);
+		fprintf(f, "urnm_mfpr_x20=%d\n", dut->urnm_mfpr_x20);
+		fprintf(f, "urnm_mfpr=%d\n", dut->rnm_mfp);
+	}
 	fclose(f);
 
-	if (dut->ap_is_dual && conf_counter == 0) {
+	if ((dut->ap_is_dual || dut->ap_is_mlo) && conf_counter == 0) {
 		conf_counter++;
 		goto write_conf;
 	}
@@ -10094,8 +10438,10 @@ skip_vht_parameters_set:
 			 dut->use_hostapd_pid_file ?
 			 " -P " SIGMA_DUT_HOSTAPD_PID_FILE : "",
 			 dut->sigma_tmpdir,
-			 dut->ap_is_dual ? dut->sigma_tmpdir : "",
-			 dut->ap_is_dual ? "/sigma_dut-ap_0.conf" : "");
+			 (dut->ap_is_dual || dut->ap_is_mlo) ?
+			 dut->sigma_tmpdir : "",
+			 (dut->ap_is_dual || dut->ap_is_mlo) ?
+			 "/sigma_dut-ap_0.conf" : "");
 	}
 
 	sigma_dut_print(dut, DUT_MSG_DEBUG, "hostapd command: %s", buf);
@@ -10512,6 +10858,44 @@ static void ath_reset_vht_defaults(struct sigma_dut *dut)
 
 #ifdef NL80211_SUPPORT
 
+#define SUITE(oui, id)  (((oui) << 8) | (id))
+
+/* cipher suite selectors */
+#define WLAN_CIPHER_SUITE_WEP40         SUITE(0x000FAC, 1)
+#define WLAN_CIPHER_SUITE_TKIP          SUITE(0x000FAC, 2)
+#define WLAN_CIPHER_SUITE_CCMP          SUITE(0x000FAC, 4)
+#define WLAN_CIPHER_SUITE_WEP104        SUITE(0x000FAC, 5)
+#define WLAN_CIPHER_SUITE_GCMP          SUITE(0x000FAC, 8)
+#define WLAN_CIPHER_SUITE_GCMP_256      SUITE(0x000FAC, 9)
+#define WLAN_CIPHER_SUITE_CCMP_256      SUITE(0x000FAC, 10)
+
+
+static void get_cipher_info(u32 cipher, int *ciphers_capa)
+{
+	switch (cipher) {
+	case WLAN_CIPHER_SUITE_WEP40:
+	case WLAN_CIPHER_SUITE_WEP104:
+		*ciphers_capa |= BIT(AP_WEP);
+		break;
+	case WLAN_CIPHER_SUITE_TKIP:
+		*ciphers_capa |= BIT(AP_TKIP);
+		break;
+	case WLAN_CIPHER_SUITE_CCMP:
+		*ciphers_capa |= BIT(AP_CCMP);
+		break;
+	case WLAN_CIPHER_SUITE_GCMP:
+		*ciphers_capa |= BIT(AP_GCMP_128);
+		break;
+	case WLAN_CIPHER_SUITE_GCMP_256:
+		*ciphers_capa |= BIT(AP_GCMP_256);
+		break;
+	case WLAN_CIPHER_SUITE_CCMP_256:
+		*ciphers_capa |= BIT(AP_CCMP_256);
+		break;
+	}
+}
+
+
 #define IEEE80211_HT_AMPDU_PARAM_FACTOR        0x3
 #define IEEE80211_HT_AMPDU_PARAM_DENSITY_SHIFT	2
 
@@ -10628,8 +11012,8 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct sigma_dut *dut = arg;
 	unsigned int tx_antenna_mask;
-	struct nlattr *nl_band;
-	int rem_band;
+	struct nlattr *nl_band, *nl_cipher;
+	int rem_band, rem_cipher;
 
 	nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
 		  genlmsg_attrlen(gnlh, 0), NULL);
@@ -10656,6 +11040,15 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 	if (dut->program == PROGRAM_HE &&
 	    !(dut->hw_modes.ap_he_phy_capab[33 / 8] & (1 << (33 % 8))))
 		dut->ap_mu_txBF = 0;
+
+	if (tb[NL80211_ATTR_CIPHER_SUITES]) {
+		nla_for_each_nested(nl_cipher, tb[NL80211_ATTR_CIPHER_SUITES],
+				    rem_cipher) {
+			u32 cipher = nla_get_u32(nl_cipher);
+
+			get_cipher_info(cipher, &dut->ciphers_capa);
+		}
+	}
 
 	return 0;
 }
@@ -10781,6 +11174,12 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 		dut->ap_tag_channel[i] = 0;
 	}
 
+	for (i = 0; i < AP_BAND_MAX; i++) {
+		dut->ap_mlo_links[i].configured = false;
+		dut->ap_mlo_links[i].dtim = 0;
+		dut->ap_mlo_links[i].treat_6ghz_as_5ghz = false;
+	}
+
 	drv = get_driver_type(dut);
 
 	program = get_param(cmd, "program");
@@ -10805,6 +11204,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_addba_reject = VALUE_NOT_SET;
 	dut->ap_noack = VALUE_NOT_SET;
 	dut->ap_is_dual = 0;
+	dut->ap_is_mlo = 0;
 	dut->ap_mode = AP_inval;
 	dut->ap_mode_1 = AP_inval;
 	dut->ap_channel_1 = 0;
@@ -10823,6 +11223,7 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ap_ampdu_exp = 0;
 	dut->ap_max_mpdu_len = 0;
 	dut->ap_band_6g = 0;
+	dut->ap_band = -1;
 	dut->ap_punct_bitmap = 0;
 	dut->ap_center_freq = 0;
 
@@ -10839,11 +11240,15 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 	dut->ft_bss_mac_cnt = 0;
 	dut->ap_interface_5g = 0;
 	dut->ap_interface_2g = 0;
+	dut->ap_interface_6g = 0;
 	dut->ap_pmf = AP_PMF_DISABLED;
 
 	dut->wsc_fragment = 0;
 	dut->eap_fragment = 0;
 	dut->wps_forced_version = 0;
+	dut->secure_ltf_supported = -1;
+	dut->ap_pasn_unauth = -1;
+	dut->ap_pasn = PASN_DISABLED;
 
 	if (dut->program == PROGRAM_HT || dut->program == PROGRAM_VHT) {
 		dut->ap_wme = AP_WME_ON;
@@ -11027,6 +11432,12 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 		dut->ap_interworking = 0;
 		dut->ap_gas_cb_delay = 0;
 		dut->ap_msnt_type = 0;
+	}
+	if (dut->program == PROGRAM_PR) {
+		dut->i2rlmrpolicy = LOC_FORCE_FTM_I2R_LMR_POLICY;
+		dut->urnm_mfpr_x20 = 1;
+		dut->rnm_mfp = 0;
+		dut->secure_ltf_supported = 1;
 	}
 	dut->ap_ft_oa = 0;
 	dut->ap_ft_ds = VALUE_NOT_SET;
@@ -12456,6 +12867,53 @@ enum sigma_cmd_result cmd_ap_send_frame(struct sigma_dut *dut,
 }
 
 
+static int ap_get_mlo_link_addr(struct sigma_dut *dut, const char *ifname,
+				int link_band, char *link_addr, int tag)
+{
+	char buf[4096];
+	int freq;
+	int freq_band;
+
+	if (get_hapd_status(ifname, "freq", buf, sizeof(buf)) < 0) {
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"%s: Failed to get link freq %s %s",
+				__func__, ifname, sigma_hapd_ctrl ?
+				sigma_hapd_ctrl : "/var/run/hostapd");
+		return -1;
+	}
+
+	freq = atoi(buf);
+	if (is_6ghz_freq(freq))
+		freq_band = AP_BAND_6GHz;
+	else if (freq >= 2412 && freq <= 2484)
+		freq_band = AP_BAND_24GHz;
+	else
+		freq_band = AP_BAND_5GHz;
+
+	if (link_band == freq_band && tag == 1) {
+		if (get_hapd_status(ifname, "link_addr", buf,
+				    sizeof(buf)) < 0) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"%s: Failed to get link addr",
+					__func__);
+			return -1;
+		}
+		strlcpy(link_addr, buf, 18);
+	} else {
+		if (get_hapd_status(ifname, "partner_link[1]", buf,
+				    sizeof(buf)) < 0) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"%s: Failed to get partner link addr",
+					__func__);
+			return -1;
+		}
+		strlcpy(link_addr, buf, 18);
+	}
+
+	return 0;
+}
+
+
 static enum sigma_cmd_result cmd_ap_get_mac_address(struct sigma_dut *dut,
 						    struct sigma_conn *conn,
 						    struct sigma_cmd *cmd)
@@ -12469,6 +12927,8 @@ static enum sigma_cmd_result cmd_ap_get_mac_address(struct sigma_dut *dut,
 	struct ifreq ifr;
 	int s, wlan_tag = 1;
 	const char *val;
+	char link_addr[18];
+	int link_band = -1;
 
 	val = get_param(cmd, "WLAN_TAG");
 	if (val) {
@@ -12485,6 +12945,30 @@ static enum sigma_cmd_result cmd_ap_get_mac_address(struct sigma_dut *dut,
 	}
 
 	get_if_name(dut, ifname, sizeof(ifname), wlan_tag);
+
+	val = get_param(cmd, "INTERFACE");
+	if (val) {
+		if (strcasecmp(val, "5G") == 0)
+			link_band = AP_BAND_5GHz;
+		else if (strcasecmp(val, "6G") == 0)
+			link_band = AP_BAND_6GHz;
+		else if (strcasecmp(val, "24G") == 0)
+			link_band = AP_BAND_24GHz;
+	}
+
+	/* Get link MAC address for AP MLD cases */
+	if (dut->ap_mode == AP_11be && link_band >= 0) {
+		if (ap_get_mlo_link_addr(dut, ifname, link_band, link_addr,
+					 wlan_tag)) {
+			snprintf(resp, sizeof(resp),
+				 "errorCode,Could not get link addr");
+			send_resp(dut, conn, SIGMA_ERROR, resp);
+			return STATUS_SENT_ERROR;
+		}
+		snprintf(resp, sizeof(resp), "mac,%s", link_addr);
+		send_resp(dut, conn, SIGMA_COMPLETE, resp);
+		return STATUS_SENT;
+	}
 
 	s = socket(AF_INET, SOCK_DGRAM, 0);
 	if (s < 0)
@@ -14914,9 +15398,8 @@ static int hostapd_chan_switch(struct sigma_dut *dut, const char *ifname,
 		if (is_6g || channel > 14)  {
 			sec_channel_offset = get_sec_channel_offset(channel,
 								    is_6g);
-			center_freq_idx = get_oper_centr_freq_seq_idx(dut,
-								      chwidth,
-								      channel);
+			center_freq_idx = get_oper_centr_freq_seq_idx(
+				dut, chwidth, channel, dut->ap_band);
 		} else {
 			sec_channel_offset = 1;
 			center_freq_idx = channel + 10;
@@ -15003,6 +15486,7 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	const char *val;
 	const char *ifname;
 	const char *type = get_param(cmd, "type");
+	int ap_chwidth, mlo_band = 0;
 
 	ifname = get_main_ifname(dut);
 
@@ -15010,28 +15494,49 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	if (val && wcn_vht_chnum_band(dut, ifname, type, val) < 0)
 		return ERROR_SEND_STATUS;
 
+	if (dut->ap_mode != AP_11be) {
+		ap_chwidth = dut->ap_chwidth;
+	} else {
+		val = get_param(cmd, "Interface");
+		if (val) {
+			if (strcasecmp(val, "5G") == 0)
+				mlo_band = AP_BAND_5GHz;
+			else if (strcasecmp(val, "24G") == 0)
+				mlo_band = AP_BAND_24GHz;
+			else
+				mlo_band = AP_BAND_6GHz;
+		}
+		ap_chwidth = dut->ap_mlo_links[mlo_band].chwidth;
+	}
+
 	val = get_param(cmd, "txBandwidth");
 	if (val) {
-		int old_ch_bw = dut->ap_chwidth;
+		int old_ch_bw = ap_chwidth;
 
 		if (strcasecmp(val, "Auto") == 0) {
-			dut->ap_chwidth = 0;
+			ap_chwidth = 0;
 		} else if (strcasecmp(val, "20") == 0) {
-			dut->ap_chwidth = 0;
+			ap_chwidth = 0;
 		} else if (strcasecmp(val, "40") == 0) {
-			dut->ap_chwidth = 1;
+			ap_chwidth = 1;
 		} else if (strcasecmp(val, "80") == 0) {
-			dut->ap_chwidth = 2;
+			ap_chwidth = 2;
 		} else if (strcasecmp(val, "160") == 0) {
-			dut->ap_chwidth = 3;
+			ap_chwidth = 3;
 		} else if (strcasecmp(val, "320") == 0) {
-			dut->ap_chwidth = 4;
+			ap_chwidth = 4;
 		} else {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "ErrorCode,WIDTH not supported");
 			return STATUS_SENT_ERROR;
 		}
-		if (old_ch_bw != dut->ap_chwidth) {
+		if (old_ch_bw != ap_chwidth) {
+			if (dut->ap_mode != AP_11be)
+				dut->ap_chwidth = ap_chwidth;
+			else
+				dut->ap_mlo_links[mlo_band].chwidth =
+					ap_chwidth;
+
 			if (cmd_ap_config_commit(dut, conn, cmd) <= 0)
 				return STATUS_SENT_ERROR;
 		} else {
@@ -15194,7 +15699,7 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 	if (val) {
 		int chwidth;
 
-		switch (dut->ap_chwidth) {
+		switch (ap_chwidth) {
 		case AP_80:
 			chwidth = 80;
 			break;
@@ -15208,7 +15713,8 @@ static enum sigma_cmd_result wcn_ap_set_rfeature(struct sigma_dut *dut,
 			return ERROR_SEND_STATUS;
 		}
 
-		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(dut, val);
+		dut->ap_punct_bitmap = get_bitmap_from_punct_chlist(dut, val,
+								    mlo_band);
 		if (dut->ap_punct_bitmap < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				  "errorCode,Invalid punct bitmap");
@@ -15250,7 +15756,8 @@ static int mac80211_vht_chnum_band(struct sigma_dut *dut, const char *ifname,
 	if (result)
 		chwidth = atoi(result);
 
-	center_freq_idx = get_oper_centr_freq_seq_idx(dut, chwidth, channel);
+	center_freq_idx = get_oper_centr_freq_seq_idx(dut, chwidth,
+						      channel, dut->ap_band);
 	if (center_freq_idx < 0) {
 		free(token);
 		return -1;
@@ -15300,7 +15807,8 @@ mac80211_he_tx_bandwidth(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	width = atoi(val);
 	center_freq_idx = get_oper_centr_freq_seq_idx(dut, width,
-						      dut->ap_channel);
+						      dut->ap_channel,
+						      dut->ap_band);
 	if (center_freq_idx < 0)
 		return ERROR_SEND_STATUS;
 
@@ -15358,6 +15866,9 @@ static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
 	int16_t he_ltf = 0xFF;
 	char *mode = dut->use_5g ? "5" : "2.4";
 	int ret = -1;
+
+	if (dut->ap_band_6g)
+		mode = "6";
 
 	if (dut->ar_ltf) {
 		he_ltf = mac80211_he_ltf_mapping(dut, dut->ar_ltf);
