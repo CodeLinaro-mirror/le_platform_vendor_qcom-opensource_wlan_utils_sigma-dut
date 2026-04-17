@@ -19401,6 +19401,8 @@ static int mac80211_he_ltf_mapping(struct sigma_dut *dut,
 static int mac80211_he_gi_mapping(struct sigma_dut *dut,
 				  const char *val)
 {
+	if (!val)
+		return -1;
 	if (strcmp(val, "0.8") == 0)
 		return 9;
 	if (strcmp(val, "1.6") == 0)
@@ -20241,6 +20243,8 @@ static enum sigma_cmd_result cmd_sta_set_pwrsave(struct sigma_dut *dut,
 		return cmd_sta_set_power_save_wcn(intf, dut, conn, cmd);
 	} else if (prog && get_driver_type(dut) == DRIVER_MAC80211 &&
 		   strcasecmp(prog, "HE") == 0) {
+		if (!powersave)
+			return INVALID_SEND_STATUS;
 		if (strcasecmp(powersave, "On") == 0)
 			res = set_ps(intf, dut, 1);
 		else if (strcasecmp(powersave, "Off") == 0)
