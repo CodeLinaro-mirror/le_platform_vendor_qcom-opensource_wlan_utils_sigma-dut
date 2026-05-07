@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2021, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -2712,6 +2713,12 @@ static enum sigma_cmd_result cmd_sta_set_psk(struct sigma_dut *dut,
 
 	val = get_param(cmd, "PasswordId");
 	if (val && set_network_quoted(ifname, id, "sae_password_id", val) < 0)
+		return ERROR_SEND_STATUS;
+
+	val = get_param(cmd, "PasswordIDChange");
+	if (val &&
+	    set_network(ifname, id, "sae_password_id_change",
+			get_enable_disable(val) ? "1" : "0") < 0)
 		return ERROR_SEND_STATUS;
 
 	val = get_param(cmd, "ECGroupID");
@@ -8561,6 +8568,16 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 		case DRIVER_WCN:
 			iwpriv_sta_set_amsdu(dut, intf, val);
 			break;
+		case DRIVER_MAC80211:
+			/* For mac80211 drivers, A-MSDU is enabled by default
+			 * and there is no mechanism for disabling it. */
+			if (strcmp(val, "0") == 0 ||
+			    strcasecmp(val, "Disable") == 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Disabling AMSDU aggregation is not supported");
+				return STATUS_SENT_ERROR;
+			}
+			break;
 		default:
 			if (strcmp(val, "1") == 0 ||
 			    strcasecmp(val, "Enable") == 0) {
@@ -10310,6 +10327,22 @@ static int sta_set_eht_btm_recomm_multi_ap_supp(struct sigma_dut *dut,
 }
 
 
+static int sta_set_eht_mlo_ie_rsvd_bits(struct sigma_dut *dut,
+					const char *intf, int val)
+{
+#ifdef NL80211_SUPPORT
+	return wcn_wifi_test_config_set_u8(
+		dut, intf,
+		QCA_WLAN_VENDOR_ATTR_WIFI_TEST_CONFIG_EHT_SET_MLE_RESERVED_FIELDS,
+		val);
+#else /* NL80211_SUPPORT */
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"EHT MLO IE reserved bits cannot be set without NL80211_SUPPORT defined");
+	return -1;
+#endif /* NL80211_SUPPORT */
+}
+
+
 static int sta_set_eht_triggered_su_bforming_feedback(struct sigma_dut *dut,
 						      const char *intf, u8 val)
 {
@@ -11361,6 +11394,7 @@ static void sta_reset_default_wcn(struct sigma_dut *dut, const char *intf,
 		/* Reset the device EHT capabilities to its default supported
 		 * configuration. */
 		sta_set_eht_testbed_def(dut, intf, 0);
+		sta_set_eht_mlo_ie_rsvd_bits(dut, intf, 0);
 		sta_config_params(dut, intf,
 				  STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS, 0);
 		sta_config_params(dut, intf, STA_SET_EHT_EML_CAPABILITY, 0);
@@ -13059,11 +13093,28 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "BCC");
 	if (val) {
 		int bcc;
+		char buf[64];
 
 		bcc = strcmp(val, "1") == 0 || strcasecmp(val, "Enable") == 0;
 		/* use LDPC setting itself to set bcc coding, bcc coding
 		 * is mutually exclusive to bcc */
-		wcn_sta_set_ldpc(dut, intf, !bcc);
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			wcn_sta_set_ldpc(dut, intf, !bcc);
+			break;
+		case DRIVER_MAC80211:
+			fwtest_cmd_wrapper(dut,
+					   "-t 1 -m 0x0 -v 0 0x1B 0x10000407",
+					   intf);
+			snprintf(buf, sizeof(buf), "-t 1 -m 0x0 -v 0 0x1D %d",
+				 !bcc);
+			fwtest_cmd_wrapper(dut, buf, intf);
+			break;
+		default:
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Setting bcc not supported");
+			break;
+		}
 	}
 
 	val = get_param(cmd, "MaxHE-MCS_1SS_RxMapLTE80");
@@ -13934,6 +13985,10 @@ cmd_sta_set_wireless_eht(struct sigma_dut *dut, struct sigma_conn *conn,
 		else
 			sta_set_eht_btm_recomm_multi_ap_supp(dut, intf, 0);
 	}
+
+	val = get_param(cmd, "MLO_IE_Rsvd_Bits");
+	if (val)
+		sta_set_eht_mlo_ie_rsvd_bits(dut, intf, (u8) atoi(val));
 
 	return cmd_sta_set_wireless_vht(dut, conn, cmd);
 }
@@ -19346,6 +19401,8 @@ static int mac80211_he_ltf_mapping(struct sigma_dut *dut,
 static int mac80211_he_gi_mapping(struct sigma_dut *dut,
 				  const char *val)
 {
+	if (!val)
+		return -1;
 	if (strcmp(val, "0.8") == 0)
 		return 9;
 	if (strcmp(val, "1.6") == 0)
@@ -19455,6 +19512,10 @@ mac80211_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 			  "ErrorCode,sta_transmit_omi failed");
 		return STATUS_SENT_ERROR;
 	}
+
+	val = get_param(cmd, "Ch_Pref");
+	if (val && mbo_set_non_pref_ch_list(dut, conn, intf, cmd) == 0)
+		return STATUS_SENT;
 
 	return SUCCESS_SEND_STATUS;
 }
@@ -20182,6 +20243,8 @@ static enum sigma_cmd_result cmd_sta_set_pwrsave(struct sigma_dut *dut,
 		return cmd_sta_set_power_save_wcn(intf, dut, conn, cmd);
 	} else if (prog && get_driver_type(dut) == DRIVER_MAC80211 &&
 		   strcasecmp(prog, "HE") == 0) {
+		if (!powersave)
+			return INVALID_SEND_STATUS;
 		if (strcasecmp(powersave, "On") == 0)
 			res = set_ps(intf, dut, 1);
 		else if (strcasecmp(powersave, "Off") == 0)
