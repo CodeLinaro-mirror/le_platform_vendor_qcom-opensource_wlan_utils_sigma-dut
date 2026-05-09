@@ -3,6 +3,7 @@
  * Copyright (c) 2010, Atheros Communications, Inc.
  * Copyright (c) 2012-2014, 2016, Qualcomm Atheros, Inc.
  * Copyright (c) 2018, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -29,8 +30,17 @@ int get_wpa_ssid_bssid(struct sigma_dut *dut, const char *ifname,
 		       char *buf, size_t buf_size);
 int get_hapd_config(const char *ifname, const char *field, char *obuf,
 		    size_t obuf_size);
+int get_hapd_status(const char *ifname, const char *field, char *obuf,
+		   size_t obuf_size);
 void remove_wpa_networks(const char *ifname);
-
+int get_mlo_link_mac_ap_link(struct sigma_dut *dut, const char *ifname,
+			     const char *ap_link_addr,
+			     char *obuf, size_t obuf_size);
+int get_mlo_link_id_link_mac(struct sigma_dut *dut, const char *ifname,
+			     const char *link_addr,
+			     char *obuf, size_t obuf_size);
+int ap_get_mlo_link_id(struct sigma_dut *dut, const char *ifname);
+int get_connected_mlo_link_ids(struct sigma_dut *dut, const char *ifname);
 struct wpa_ctrl * open_wpa_mon(const char *ifname);
 struct wpa_ctrl * open_hapd_mon(const char *ifname);
 int wait_ip_addr(struct sigma_dut *dut, const char *ifname, int timeout);
@@ -44,6 +54,7 @@ int get_wpa_cli_events(struct sigma_dut *dut, struct wpa_ctrl *mon,
 int get_wpa_cli_events_timeout(struct sigma_dut *dut, struct wpa_ctrl *mon,
 			       const char **events, char *buf, size_t buf_size,
 			       unsigned int timeout);
+int add_ipv6_rule(struct sigma_dut *dut, const char *ifname);
 
 int add_network(const char *ifname);
 int set_network(const char *ifname, int id, const char *field,
