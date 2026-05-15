@@ -702,6 +702,12 @@ lowi_cmd_sta_reset_ptksa_cache(struct sigma_dut *dut, struct sigma_conn *conn,
 	const char *intf = get_param(cmd, "Interface");
 	char buf[1024], bssid[18], req[200], *pos;
 
+	if (!intf) {
+		send_resp(dut, conn, SIGMA_INVALID,
+			  "errorCode,Interface argument is missing");
+		return STATUS_SENT_ERROR;
+	}
+
 	memset(req, 0, sizeof(req));
 	memset(buf, 0, sizeof(buf));
 	if (wpa_command_resp(intf, "PTKSA_CACHE_LIST", buf, sizeof(buf)) < 0 ||
@@ -886,6 +892,12 @@ static int loc_r2_get_bss_frequency(struct sigma_dut *dut,
 	char buf[4096], *pos;
 	int freq, res;
 	struct wpa_ctrl *ctrl;
+
+	if (!intf) {
+		send_resp(dut, conn, SIGMA_INVALID,
+			  "errorCode,Interface argument is missing");
+		return STATUS_SENT_ERROR;
+	}
 
 	bssid = get_param(cmd, "destmac");
 	if (!bssid) {
