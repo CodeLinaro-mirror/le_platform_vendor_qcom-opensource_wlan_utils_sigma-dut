@@ -10081,7 +10081,7 @@ skip_key_mgmt:
 
 	if ((dut->program == PROGRAM_VHT) ||
 	    ((dut->program == PROGRAM_HE || dut->program == PROGRAM_EHT ||
-	      dut->program == PROGRAM_WPA3) &&
+	      dut->program == PROGRAM_WPA3 || dut->program == PROGRAM_PR) &&
 	     dut->use_5g)) {
 		int vht_oper_centr_freq_idx;
 		int chan, chwidth, band;
