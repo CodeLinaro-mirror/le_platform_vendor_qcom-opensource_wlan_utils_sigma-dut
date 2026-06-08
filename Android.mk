@@ -15,6 +15,7 @@ OBJS += atheros.c
 OBJS += ftm.c
 OBJS += dpp.c
 OBJS += dhcp.c
+OBJS += p2p_usd.c
 
 # Initialize CFLAGS to limit to local module
 CFLAGS =
@@ -69,8 +70,8 @@ LOCAL_C_INCLUDES += \
 	$(LOCAL_PATH) $(QCOM_WLAN_ROOT)/qcwcn/wifi_hal \
 	$(LOCAL_PATH) system/core/include/cutils \
 	$(LOCAL_PATH) hardware/libhardware_legacy/include/hardware_legacy \
+	$(LOCAL_PATH) hardware/interfaces/wifi/legacy_headers/include/hardware_legacy \
 	$(LOCAL_PATH) external/libpcap \
-	$(TARGET_OUT_HEADERS)/common/inc \
 	$(LOCAL_PATH) external/libnl/include
 
 LOCAL_SHARED_LIBRARIES := libc libcutils libnl
@@ -80,13 +81,18 @@ LOCAL_STATIC_LIBRARIES := libpcap.vendor
 endif
 LOCAL_SHARED_LIBRARIES += libnetutils
 LOCAL_C_INCLUDES += $(LOCAL_PATH) system/core/include/netutils
-LOCAL_SHARED_LIBRARIES += libhardware_legacy
 ifeq ($(BOARD_WLAN_DEVICE),qcwcn)
 ifneq ($(wildcard hardware/qcom/wlan/qcwcn/wifi_hal/nan_cert.h),)
 LOCAL_SHARED_LIBRARIES += libwifi-hal-qcom
 OBJS += nan.c
 CFLAGS += -DANDROID_NAN
 CFLAGS += -DANDROID_WIFI_HAL
+endif
+ifneq ($(wildcard external/mdnsresponder/mDNSShared/dns_sd.h),)
+CFLAGS += -DANDROID_MDNS
+LOCAL_C_INCLUDES += external/mdnsresponder/mDNSShared
+OBJS += dnssd.c
+LOCAL_SHARED_LIBRARIES += libdl
 endif
 endif
 CFLAGS += -Wno-unused-parameter

@@ -3,6 +3,7 @@
  * Copyright (c) 2014-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2021, The Linux Foundation
  * Copyright (c) 2005-2011, Jouni Malinen <j@w1.fi>
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -127,6 +128,22 @@ enum openwrt_driver_type get_openwrt_driver_type(void)
 }
 
 
+enum dev_mode dev_mode_to_enum(const char *mode)
+{
+	if (!mode)
+		return MODE_UNKNOWN;
+
+	if (strcasecmp(mode, "11be") == 0)
+		return MODE_11BE;
+	if (strcasecmp(mode, "11ax") == 0)
+		return MODE_11AX;
+	if (strcasecmp(mode, "11ac") == 0 || strcasecmp(mode, "ac") == 0)
+		return MODE_11AC;
+
+	return MODE_UNKNOWN;
+}
+
+
 enum sigma_program sigma_program_to_enum(const char *prog)
 {
 	if (prog == NULL)
@@ -177,6 +194,14 @@ enum sigma_program sigma_program_to_enum(const char *prog)
 		return PROGRAM_HE;
 	if (strcasecmp(prog, "QM") == 0)
 		return PROGRAM_QM;
+	if (strcasecmp(prog, "LOCR2") == 0)
+		return PROGRAM_LOCR2;
+	if (strcasecmp(prog, "PR") == 0)
+		return PROGRAM_PR;
+	if (strcasecmp(prog, "EHT") == 0)
+		return PROGRAM_EHT;
+	if (strcasecmp(prog, "P2P") == 0)
+		return PROGRAM_P2P;
 
 	return PROGRAM_UNKNOWN;
 }
@@ -321,6 +346,235 @@ unsigned int freq_to_channel(unsigned int freq)
 }
 
 
+int freq_to_channel_and_class(unsigned int freq, int sec_channel,
+			      enum oper_chan_width chanwidth,
+			      int *op_class, int *channel)
+{
+	u8 vht_opclass;
+
+	if (sec_channel > 1 || sec_channel < -1)
+		return -1;
+
+	if (freq >= 2412 && freq <= 2472) {
+		if ((freq - 2407) % 5)
+			return -1;
+
+		if (chanwidth)
+			return -1;
+
+		/* 2.407 GHz, channels 1..13 */
+		if (sec_channel == 1)
+			*op_class = 83;
+		else if (sec_channel == -1)
+			*op_class = 84;
+		else
+			*op_class = 81;
+
+		*channel = (freq - 2407) / 5;
+
+		return 0;
+	}
+
+	if (freq == 2484) {
+		if (sec_channel || chanwidth)
+			return -1;
+
+		*op_class = 82; /* channel 14 */
+		*channel = 14;
+
+		return 0;
+	}
+
+	if (freq >= 4900 && freq < 5000) {
+		if ((freq - 4000) % 5)
+			return -1;
+		*channel = (freq - 4000) / 5;
+		*op_class = 0; /* TODO */
+		return 0;
+	}
+
+	switch (chanwidth) {
+	case CONF_OPER_CHWIDTH_80MHZ:
+		vht_opclass = 128;
+		break;
+	case CONF_OPER_CHWIDTH_160MHZ:
+		vht_opclass = 129;
+		break;
+	case CONF_OPER_CHWIDTH_80P80MHZ:
+		vht_opclass = 130;
+		break;
+	default:
+		vht_opclass = 0;
+		break;
+	}
+
+	/* 5 GHz, channels 36..48 */
+	if (freq >= 5180 && freq <= 5240) {
+		if ((freq - 5000) % 5)
+			return -1;
+
+		if (vht_opclass)
+			*op_class = vht_opclass;
+		else if (sec_channel == 1)
+			*op_class = 116;
+		else if (sec_channel == -1)
+			*op_class = 117;
+		else
+			*op_class = 115;
+
+		*channel = (freq - 5000) / 5;
+
+		return 0;
+	}
+
+	/* 5 GHz, channels 52..64 */
+	if (freq >= 5260 && freq <= 5320) {
+		if ((freq - 5000) % 5)
+			return -1;
+
+		if (vht_opclass)
+			*op_class = vht_opclass;
+		else if (sec_channel == 1)
+			*op_class = 119;
+		else if (sec_channel == -1)
+			*op_class = 120;
+		else
+			*op_class = 118;
+
+		*channel = (freq - 5000) / 5;
+
+		return 0;
+	}
+
+	/* 5 GHz, channels 149..177 */
+	if (freq >= 5745 && freq <= 5885) {
+		if ((freq - 5000) % 5)
+			return -1;
+
+		if (vht_opclass)
+			*op_class = vht_opclass;
+		else if (sec_channel == 1)
+			*op_class = 126;
+		else if (sec_channel == -1)
+			*op_class = 127;
+		else if (freq <= 5805)
+			*op_class = 124;
+		else
+			*op_class = 125;
+
+		*channel = (freq - 5000) / 5;
+
+		return 0;
+	}
+
+	/* 5 GHz, channels 100..144 */
+	if (freq >= 5500 && freq <= 5720) {
+		if ((freq - 5000) % 5)
+			return -1;
+
+		if (vht_opclass)
+			*op_class = vht_opclass;
+		else if (sec_channel == 1)
+			*op_class = 122;
+		else if (sec_channel == -1)
+			*op_class = 123;
+		else
+			*op_class = 121;
+
+		*channel = (freq - 5000) / 5;
+
+		return 0;
+	}
+
+	if (freq >= 5000 && freq < 5900) {
+		if ((freq - 5000) % 5)
+			return -1;
+		*channel = (freq - 5000) / 5;
+		*op_class = 0; /* TODO */
+		return 0;
+	}
+
+	if (freq > 5950 && freq <= 7115) {
+		if ((freq - 5950) % 5)
+			return -1;
+
+		switch (chanwidth) {
+		case CONF_OPER_CHWIDTH_80MHZ:
+			*op_class = 133;
+			break;
+		case CONF_OPER_CHWIDTH_160MHZ:
+			*op_class = 134;
+			break;
+		case CONF_OPER_CHWIDTH_80P80MHZ:
+			*op_class = 135;
+			break;
+		case CONF_OPER_CHWIDTH_320MHZ:
+			*op_class = 137;
+			break;
+		default:
+			if (sec_channel)
+				*op_class = 132;
+			else
+				*op_class = 131;
+			break;
+		}
+
+		*channel = (freq - 5950) / 5;
+		return 0;
+	}
+
+	if (freq == 5935) {
+		*op_class = 136;
+		*channel = (freq - 5925) / 5;
+		return 0;
+	}
+
+	/* 56.16 GHz, channel 1..6 */
+	if (freq >= 56160 + 2160 * 1 && freq <= 56160 + 2160 * 6) {
+		if (sec_channel)
+			return -1;
+
+		switch (chanwidth) {
+		case CONF_OPER_CHWIDTH_USE_HT:
+		case CONF_OPER_CHWIDTH_2160MHZ:
+			*channel = (freq - 56160) / 2160;
+			*op_class = 180;
+			break;
+		case CONF_OPER_CHWIDTH_4320MHZ:
+			/* EDMG channels 9 - 13 */
+			if (freq > 56160 + 2160 * 5)
+				return -1;
+
+			*channel = (freq - 56160) / 2160 + 8;
+			*op_class = 181;
+			break;
+		case CONF_OPER_CHWIDTH_6480MHZ:
+			/* EDMG channels 17 - 20 */
+			if (freq > 56160 + 2160 * 4)
+				return -1;
+
+			*channel = (freq - 56160) / 2160 + 16;
+			*op_class = 182;
+			break;
+		case CONF_OPER_CHWIDTH_8640MHZ:
+			/* EDMG channels 25 - 27 */
+			if (freq > 56160 + 2160 * 3)
+				return -1;
+
+			*channel = (freq - 56160) / 2160 + 24;
+			*op_class = 183;
+			break;
+		default:
+			return -1;
+		}
+
+		return 0;
+	}
+
+	return -1;
+}
+
+
 int is_ipv6_addr(const char *str)
 {
 	struct sockaddr_in6 addr;
@@ -431,6 +685,31 @@ void hex_dump(struct sigma_dut *dut, u8 *data, size_t len)
 	}
 	sigma_dut_print(dut, DUT_MSG_INFO, "HEXDUMP len=[%d]", (int) len);
 	sigma_dut_print(dut, DUT_MSG_INFO, "buf:%s", buf);
+}
+
+
+int snprintf_hex(char *buf, size_t buf_size, const uint8_t *data,
+		size_t len, bool uppercase)
+{
+	size_t i;
+	char *pos = buf, *end = buf + buf_size;
+	int ret;
+
+	if (buf_size == 0)
+		return 0;
+
+	for (i = 0; i < len; i++) {
+		ret = snprintf(pos, end - pos, uppercase ? "%02X" : "%02x",
+			       data[i]);
+		if (snprintf_error(end - pos, ret)) {
+			end[-1] = '\0';
+			return pos - buf;
+		}
+		pos += ret;
+	}
+
+	end[-1] = '\0';
+	return pos - buf;
 }
 
 
@@ -1088,6 +1367,16 @@ int random_get_bytes(char *buf, size_t len)
 }
 
 
+int random_mac_addr(u8 *addr)
+{
+	if (random_get_bytes((char *) addr, ETH_ALEN) < 0)
+		return -1;
+	addr[0] &= 0xfe; /* unicast */
+	addr[0] |= 0x02; /* locally administered */
+	return 0;
+}
+
+
 int get_enable_disable(const char *val)
 {
 	if (strcasecmp(val, "enable") == 0 ||
@@ -1183,4 +1472,74 @@ void kill_pid(struct sigma_dut *dut, const char *pid_file)
 
 	unlink(pid_file);
 	sleep(1);
+}
+
+
+int chan_to_freq(int chan, bool is_6g)
+{
+	if (is_6g) {
+		if (chan == 2)
+			return 5935;
+
+		return 5950 + chan * 5;
+	}
+
+	if (chan == 14)
+		return 2484;
+	if (chan >= 1 && chan <= 13)
+		return 2407 + 5 * chan;
+
+	return 5000 + 5 * chan;
+}
+
+
+int freq_to_chan(int freq)
+{
+	if (freq == 2484)
+		return 14;
+
+	if (freq < 3000)
+		return (freq - 2407) / 5;
+
+	if (freq == 5935)
+		return 2;
+
+	if (freq > 5950)
+		return (freq - 5950) / 5;
+
+	return (freq - 5000) / 5;
+}
+
+
+bool is_6ghz_freq(int freq)
+{
+	if (freq == 5935)
+		return true;
+
+	if (freq < 5950 || freq > 7115)
+		return false;
+
+	return true;
+}
+
+
+u16 get_link_id_bitmask(const char *param)
+{
+	u16 bitmask = 0;
+	int link_id;
+
+	while (param) {
+		link_id = atoi(param);
+
+		if (link_id < 0 || link_id > 15)
+			return 0;
+
+		bitmask |= BIT(link_id);
+		param = strchr(param, ':');
+
+		if (param)
+			param++;
+	}
+
+	return bitmask;
 }
