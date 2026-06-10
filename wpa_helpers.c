@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2014, 2016, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2021, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -719,7 +720,7 @@ static int get_wpa_ctrl_status_field(const char *path, const char *ifname,
 	return -1;
 }
 
-static int get_hapd_status(const char *ifname, const char *field, char *obuf,
+int get_hapd_status(const char *ifname, const char *field, char *obuf,
 		   size_t obuf_size)
 {
 	const char *path = sigma_hapd_ctrl ?
