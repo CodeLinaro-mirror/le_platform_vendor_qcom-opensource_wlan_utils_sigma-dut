@@ -3,6 +3,7 @@
  * Copyright (c) 2010, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2020, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -16,8 +17,9 @@
 extern int sigma_periodic_data;
 
 /* Limited bit rate generator related constant or threshold values */
-  /* 25 Mbps per stream */
-#define WFA_SEND_FIX_BITRATE_MAX             25 * 1024 * 1024
+  /* 100 Mbps per stream */
+#define WFA_SEND_FIX_BITRATE_MAX             100 * 1024 * 1024
+
 
 static enum sigma_cmd_result cmd_traffic_agent_config(struct sigma_dut *dut,
 						      struct sigma_conn *conn,
