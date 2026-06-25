@@ -1673,7 +1673,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	}
 
 	val = get_param(cmd, "WIDTH");
-	if (val && dut->ap_mode != AP_11be && mlo_config_band > -1) {
+	if (val && dut->ap_mode == AP_11be && mlo_config_band > -1) {
 		if (strcasecmp(val, "20") == 0) {
 			dut->ap_mlo_links[mlo_config_band].chwidth = AP_20;
 		} else if (strcasecmp(val, "40") == 0) {
