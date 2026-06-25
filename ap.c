@@ -983,6 +983,18 @@ static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
 		ap_channel = dut->ap_channel;
 		ap_band = dut->ap_band;
 	} else {
+		if (mlo_band < 0) {
+			int i;
+
+			for (i = 0; i < AP_BAND_MAX; i++) {
+				if (dut->ap_mlo_links[i].configured) {
+					mlo_band = i;
+					break;
+				}
+			}
+			if (mlo_band < 0)
+				return -1;
+		}
 		ap_chwidth = dut->ap_mlo_links[mlo_band].chwidth;
 		ap_channel = dut->ap_mlo_links[mlo_band].channel;
 		ap_band = mlo_band;
