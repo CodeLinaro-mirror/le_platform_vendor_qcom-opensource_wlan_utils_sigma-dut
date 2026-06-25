@@ -1433,8 +1433,16 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		dut->ap_bcnint = atoi(val);
 
 	val = get_param(cmd, "DTIM");
-	if (val && dut->ap_mode == AP_11be)
-		dut->ap_mlo_links[mlo_config_band].dtim = atoi(val);
+	if (val && dut->ap_mode == AP_11be) {
+		if (mlo_config_band > -1) {
+			dut->ap_mlo_links[mlo_config_band].dtim = atoi(val);
+		} else {
+			int i;
+
+			for (i = 0; i < AP_BAND_MAX; i++)
+				dut->ap_mlo_links[i].dtim = atoi(val);
+		}
+	}
 
 	val = get_param(cmd, "RADIO");
 	if (val) {
