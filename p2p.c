@@ -131,7 +131,7 @@ void start_dhcp(struct sigma_dut *dut, const char *group_ifname, int go)
 		} else if (access("/usr/sbin/udhcpd", F_OK) != -1) {
 			f = fopen("/tmp/udhcpd.conf", "w");
 			if (f == NULL)
-				return -1;
+				return;
 			fprintf(f, "start 192.168.43.20\n");
 			fprintf(f, "end 192.168.43.254\n");
 			fprintf(f, "interface %s\n", group_ifname);
