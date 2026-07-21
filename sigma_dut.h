@@ -1006,6 +1006,7 @@ struct sigma_dut {
 	int ft_bss_mac_cnt;
 
 	char *ar_ltf;
+	unsigned int ar_autorate_misc_cfg;
 
 	int ap_numsounddim;
 	unsigned int he_mcsnssmap;

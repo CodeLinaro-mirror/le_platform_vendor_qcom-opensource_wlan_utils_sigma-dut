@@ -11685,6 +11685,7 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 		dut->default_timeout = dut->user_config_timeout;
 
 	dut->device_mode = MODE_UNKNOWN;
+	dut->ar_autorate_misc_cfg = 0;
 
 	dut->device_type = STA_unknown;
 	type = get_param(cmd, "type");
@@ -19684,6 +19685,55 @@ static int mac80211_he_gi_mapping(struct sigma_dut *dut,
 }
 
 
+#define MAC80211_AUTORATE_MISC_CFG_LTF_1X 0x00001
+#define MAC80211_AUTORATE_MISC_CFG_LTF_2X 0x00002
+#define MAC80211_AUTORATE_MISC_CFG_LTF_4X 0x00004
+#define MAC80211_AUTORATE_MISC_CFG_LTF_MASK \
+	(MAC80211_AUTORATE_MISC_CFG_LTF_1X | \
+	 MAC80211_AUTORATE_MISC_CFG_LTF_2X | \
+	 MAC80211_AUTORATE_MISC_CFG_LTF_4X)
+#define MAC80211_AUTORATE_MISC_CFG_GI_400NS 0x00100
+#define MAC80211_AUTORATE_MISC_CFG_GI_800NS 0x00200
+#define MAC80211_AUTORATE_MISC_CFG_GI_1600NS 0x00400
+#define MAC80211_AUTORATE_MISC_CFG_GI_3200NS 0x00800
+#define MAC80211_AUTORATE_MISC_CFG_GI_MASK \
+	(MAC80211_AUTORATE_MISC_CFG_GI_400NS | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_800NS | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_1600NS | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_3200NS)
+#define MAC80211_AUTORATE_MISC_CFG_GI_LTF_MASK \
+	(MAC80211_AUTORATE_MISC_CFG_LTF_MASK | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_MASK)
+#define MAC80211_AUTORATE_MISC_CFG_CODING_MASK 0x10000
+#define MAC80211_AUTORATE_MISC_CFG_LDPC_ENABLE 0x00000
+#define MAC80211_AUTORATE_MISC_CFG_LDPC_DISABLE 0x10000
+#define MAC80211_AUTORATE_MISC_CFG_DEFAULT \
+	(MAC80211_AUTORATE_MISC_CFG_LTF_MASK | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_MASK)
+
+static int
+mac80211_set_autorate_misc_cfg(struct sigma_dut *dut, const char *intf,
+				      unsigned int value, unsigned int mask)
+{
+	char buf[100];
+	unsigned int new_cfg;
+	int ret;
+
+	new_cfg = dut->ar_autorate_misc_cfg;
+	new_cfg &= ~mask;
+	new_cfg |= value & mask;
+
+	snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 0x%x",
+		 new_cfg);
+	ret = fwtest_cmd_wrapper(dut, buf, intf);
+	if (ret < 0)
+		return ret;
+
+	dut->ar_autorate_misc_cfg = new_cfg;
+	return ret;
+}
+
+
 static enum sigma_cmd_result mac80211_he_ltf(struct sigma_dut *dut,
 					     struct sigma_conn *conn,
 					     const char *intf,
@@ -19729,8 +19779,9 @@ static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
 		if (he_ltf != 0xFF)
 			value |= 1 << he_ltf;
 
-		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d", value);
-		ret = fwtest_cmd_wrapper(dut, buf, intf);
+		ret = mac80211_set_autorate_misc_cfg(
+			dut, intf, value,
+			MAC80211_AUTORATE_MISC_CFG_GI_LTF_MASK);
 		if (ret < 0)
 			return ERROR_SEND_STATUS;
 
@@ -19742,11 +19793,41 @@ static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
 				return ERROR_SEND_STATUS;
 		}
 	} else if (he_gi != 0xFF) {
-		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d",
-			 1 << he_gi);
-		ret = fwtest_cmd_wrapper(dut, buf, intf);
+		ret = mac80211_set_autorate_misc_cfg(
+			dut, intf, 1 << he_gi,
+			MAC80211_AUTORATE_MISC_CFG_GI_MASK);
 	}
 
+	if (ret < 0)
+		return ERROR_SEND_STATUS;
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result mac80211_coding_type(struct sigma_dut *dut,
+						  struct sigma_conn *conn,
+						  const char *intf,
+						  const char *val)
+{
+	unsigned int coding;
+	int ret;
+
+	if (strcasecmp(val, "BCCCoding") == 0) {
+		coding = MAC80211_AUTORATE_MISC_CFG_LDPC_DISABLE;
+	} else if (strcasecmp(val, "LDPCCoding") == 0) {
+		coding = MAC80211_AUTORATE_MISC_CFG_LDPC_ENABLE;
+	} else {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,Unsupported CodingType value");
+		return STATUS_SENT_ERROR;
+	}
+
+	if (!dut->ar_autorate_misc_cfg)
+		dut->ar_autorate_misc_cfg = MAC80211_AUTORATE_MISC_CFG_DEFAULT;
+
+	ret = mac80211_set_autorate_misc_cfg(
+		dut, intf, coding, MAC80211_AUTORATE_MISC_CFG_CODING_MASK);
 	if (ret < 0)
 		return ERROR_SEND_STATUS;
 
@@ -19771,6 +19852,13 @@ mac80211_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 	val = get_param(cmd, "GI");
 	if (val || dut->ar_ltf) {
 		res = mac80211_he_gi(dut, intf, val);
+		if (res != SUCCESS_SEND_STATUS)
+			return res;
+	}
+
+	val = get_param(cmd, "CodingType");
+	if (val) {
+		res = mac80211_coding_type(dut, conn, intf, val);
 		if (res != SUCCESS_SEND_STATUS)
 			return res;
 	}
