@@ -115,6 +115,8 @@ struct sigma_dut;
 /* Set default operating channel width 80 MHz */
 #define VHT_DEFAULT_OPER_CHWIDTH AP_80_VHT_OPER_CHWIDTH
 
+#define SYSTEM_CMD_QLEN_MAX 64
+
 typedef unsigned int u32;
 typedef uint16_t u16;
 typedef unsigned char u8;
@@ -1324,6 +1326,7 @@ struct sigma_dut {
 	unsigned int prev_disable_scs_support;
 	unsigned int prev_disable_mscs_support;
 	int dscp_use_iptables;
+	bool defer_fwtest_cmds;
 	int autoconnect_default;
 	int dhcp_client_running;
 	int i2rlmr_iftmr;
@@ -1359,6 +1362,8 @@ struct sigma_dut {
 	pthread_t p2p_event_mon_thread;
 	enum sigma_cmd_avail ifconfig_avail;
 	enum sigma_cmd_avail ip_avail;
+	char *system_cmd_bufq[SYSTEM_CMD_QLEN_MAX];
+	unsigned int system_cmd_qlen;
 };
 
 
@@ -1514,6 +1519,10 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		    struct sigma_cmd *cmd);
 int start_dhcp_client(struct sigma_dut *dut, const char *ifname);
 void kill_dhcp_client(struct sigma_dut *dut, const char *ifname);
+
+int system_cmd_enqueue(struct sigma_dut *dut, const char *cmd);
+int system_cmd_dequeue(struct sigma_dut *dut);
+void system_cmd_flush(struct sigma_dut *dut);
 
 /* p2p.c */
 void p2p_register_cmds(void);

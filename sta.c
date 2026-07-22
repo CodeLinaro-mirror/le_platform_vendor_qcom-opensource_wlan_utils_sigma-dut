@@ -610,6 +610,77 @@ int wil6210_set_force_mcs(struct sigma_dut *dut, int force, int mcs)
 }
 
 
+int system_cmd_dequeue(struct sigma_dut *dut)
+{
+	unsigned int i;
+
+	if (!dut)
+		return -1;
+	if (!dut->defer_fwtest_cmds)
+		return 0;
+
+	for (i = 0; i < dut->system_cmd_qlen; i++) {
+		run_system_wrapper(dut, "%s", dut->system_cmd_bufq[i]);
+		free(dut->system_cmd_bufq[i]);
+		dut->system_cmd_bufq[i] = NULL;
+	}
+	dut->system_cmd_qlen = 0;
+	return 0;
+}
+
+
+int system_cmd_enqueue(struct sigma_dut *dut, const char *cmd)
+{
+	unsigned int i;
+
+	if (!dut || !cmd)
+		return -1;
+	if (!dut->defer_fwtest_cmds)
+		return 0;
+
+	if (dut->system_cmd_qlen >= SYSTEM_CMD_QLEN_MAX) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"system_cmd queue full");
+		return -1;
+	}
+
+	for (i = 0; i < dut->system_cmd_qlen; i++) {
+		if (strcmp(dut->system_cmd_bufq[i], cmd) == 0) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"system_cmd already in queue");
+			return 0;
+		}
+	}
+
+	dut->system_cmd_bufq[dut->system_cmd_qlen] = strdup(cmd);
+	if (!dut->system_cmd_bufq[dut->system_cmd_qlen]) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"system_cmd enqueue failed");
+		return -1;
+	}
+	dut->system_cmd_qlen++;
+
+	return 0;
+}
+
+
+void system_cmd_flush(struct sigma_dut *dut)
+{
+	unsigned int i;
+
+	if (!dut)
+		return;
+	if (!dut->defer_fwtest_cmds)
+		return;
+
+	for (i = 0; i < dut->system_cmd_qlen; i++) {
+		free(dut->system_cmd_bufq[i]);
+		dut->system_cmd_bufq[i] = NULL;
+	}
+	dut->system_cmd_qlen = 0;
+}
+
+
 static int wil6210_force_rsn_ie(struct sigma_dut *dut, int state)
 {
 	struct wil_wmi_force_rsn_ie cmd = { };
@@ -5963,7 +6034,8 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 		if ((dut->program == PROGRAM_WPA3 &&
 		     dut->sta_associate_wait_connect) ||
 		    dut->program == PROGRAM_QM || ap_link_mac ||
-		    (dut->dhcp_client_running && dut->client_privacy)) {
+		    (dut->dhcp_client_running && dut->client_privacy) ||
+		    (dut->defer_fwtest_cmds && dut->system_cmd_qlen > 0)) {
 			ctrl = open_wpa_mon(get_station_ifname(dut));
 			if (!ctrl)
 				return ERROR_SEND_STATUS;
@@ -6074,6 +6146,7 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 		}
 
 		if (strstr(buf, "CTRL-EVENT-CONNECTED")) {
+			system_cmd_dequeue(dut);
 			if (dut->dhcp_client_running && dut->client_privacy) {
 				/*
 				 * Interface MAC address will be changed by
@@ -11595,6 +11668,8 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 					  buf, sizeof(buf)));
 #endif /* ANDROID */
 
+	system_cmd_flush(dut);
+
 	if (dut->station_ifname_2g &&
 	    strcmp(dut->station_ifname_2g, intf) == 0)
 		dut->use_5g = 0;
@@ -13029,6 +13104,30 @@ mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
 }
 
 
+static void mac80211_sta_set_ldpc(struct sigma_dut *dut, const char *intf,
+				  int ldpc)
+{
+	char buf[128];
+
+	if (dut->defer_fwtest_cmds) {
+		snprintf(buf, sizeof(buf),
+			 "ath11k-fwtest -i %s -t 1 -m 0x0 -v 0 0x1B 0x10000407",
+			 intf);
+		system_cmd_enqueue(dut, buf);
+
+		snprintf(buf, sizeof(buf),
+			 "ath11k-fwtest -i %s -t 1 -m 0x0 -v 0 0x1D %d",
+			 intf, ldpc);
+		system_cmd_enqueue(dut, buf);
+	} else {
+		fwtest_cmd_wrapper(dut, "-t 1 -m 0x0 -v 0 0x1B 0x10000407",
+				   intf);
+		snprintf(buf, sizeof(buf), "-t 1 -m 0x0 -v 0 0x1D %d", ldpc);
+		fwtest_cmd_wrapper(dut, buf, intf);
+	}
+}
+
+
 static enum sigma_cmd_result
 cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			 struct sigma_cmd *cmd)
@@ -13120,7 +13219,6 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "BCC");
 	if (val) {
 		int bcc;
-		char buf[64];
 
 		bcc = strcmp(val, "1") == 0 || strcasecmp(val, "Enable") == 0;
 		/* use LDPC setting itself to set bcc coding, bcc coding
@@ -13130,12 +13228,7 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			wcn_sta_set_ldpc(dut, intf, !bcc);
 			break;
 		case DRIVER_MAC80211:
-			fwtest_cmd_wrapper(dut,
-					   "-t 1 -m 0x0 -v 0 0x1B 0x10000407",
-					   intf);
-			snprintf(buf, sizeof(buf), "-t 1 -m 0x0 -v 0 0x1D %d",
-				 !bcc);
-			fwtest_cmd_wrapper(dut, buf, intf);
+			mac80211_sta_set_ldpc(dut, intf, !bcc);
 			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
