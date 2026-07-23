@@ -200,6 +200,9 @@ static int get_key_mgmt_capa(struct sigma_dut *dut);
 static int get_pairwise_ciphers_capa(struct sigma_dut *dut);
 static int get_group_ciphers_capa(struct sigma_dut *dut);
 static int get_group_mgmt_ciphers_capa(struct sigma_dut *dut);
+static int
+mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
+				int buf_size);
 
 #ifdef ANDROID
 
@@ -11529,6 +11532,21 @@ static void sta_reset_default_wcn(struct sigma_dut *dut, const char *intf,
 }
 
 
+static void sta_reset_default_mac80211(struct sigma_dut *dut, const char *intf)
+{
+	int ret = 0;
+
+	if ((dut->program == PROGRAM_HE || dut->program == PROGRAM_EHT ||
+	    dut->device_mode == MODE_11BE || dut->program == PROGRAM_QM) &&
+	    strncmp(dut->device_driver, "ath12k", 6) == 0) {
+		ret = mac80211_sta_set_addba_buf_size(dut, intf, 64);
+		if (ret)
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"addba buf size set err %d", ret);
+	}
+}
+
+
 static int sta_set_client_privacy(struct sigma_dut *dut,
 				  struct sigma_conn *conn, const char *intf,
 				  int enable)
@@ -11722,6 +11740,9 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 		break;
 	case DRIVER_WCN:
 		sta_reset_default_wcn(dut, intf, type);
+		break;
+	case DRIVER_MAC80211:
+		sta_reset_default_mac80211(dut, intf);
 		break;
 	default:
 		break;
@@ -13099,9 +13120,16 @@ mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
 {
 	char buf[64];
 
-	snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x7e %d",
-		 buf_size == 256 ? 3 : 2);
-	return fwtest_cmd_wrapper(dut, buf, intf);
+	if (dut->defer_fwtest_cmds) {
+		snprintf(buf, sizeof(buf),
+			 "ath11k-fwtest -i %s -t 1 -m 0 -v 0 0x7e %d",
+			 intf, buf_size == 256 ? 3 : 2);
+		return system_cmd_enqueue(dut, buf);
+	} else {
+		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x7e %d",
+			 buf_size == 256 ? 3 : 2);
+		return fwtest_cmd_wrapper(dut, buf, intf);
+	}
 }
 
 
